@@ -77,13 +77,11 @@ CFLAGS := \
 	-mgeneral-regs-only \
 	-mstrict-align \
 	-O2 \
-	-g \
 	-DSTORAGE_WRITE_TEST=$(STORAGE_WRITE_TEST) \
 	$(INCLUDES)
 
 ASFLAGS := \
 	-ffreestanding \
-	-g \
 	$(INCLUDES)
 
 LDFLAGS := \
