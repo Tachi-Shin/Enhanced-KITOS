@@ -2,7 +2,7 @@
 
 #include <dos/type.h>
 
-#include <arch/arm64/rpi4/mmio.h>
+#include <arch/io.h>
 
 #include <drivers/uart/uart.h>
 #include <drivers/uart/pl011/pl011.h>
@@ -55,14 +55,15 @@
 
 static int pl011_init(struct uart_device *dev);
 static void pl011_putc(struct uart_device *dev, char c);
-static char pl011_getc(struct uart_device *dev);
 
-static void pl011_configure_gpio(void);
+static void pl011_enable_rx_irq(struct uart_device *dev);
+static void pl011_handle_irq(struct uart_device *dev);
 
 static const struct uart_ops pl011_ops = {
     .init = pl011_init,
     .putc = pl011_putc,
-    .getc = pl011_getc,
+    .enable_rx_irq = pl011_enable_rx_irq,
+    .handle_irq = pl011_handle_irq,
 };
 
 static struct uart_device pl011_device = {
@@ -75,50 +76,6 @@ static struct uart_device pl011_device = {
 struct uart_device *pl011_get_device(void)
 {
     return &pl011_device;
-}
-
-static void pl011_configure_gpio(void)
-{
-    uint32_t value;
-
-    /*
-     * GPIO14とGPIO15をALT0へ設定する。
-     *
-     * GPIO14:
-     *   GPFSEL1 bits 12-14
-     *
-     * GPIO15:
-     *   GPFSEL1 bits 15-17
-     *
-     * ALT0:
-     *   0b100
-     */
-    value = mmio_read32(GPIO_BASE + GPIO_GPFSEL1);
-
-    value &= ~((7U << 12) | (7U << 15));
-    value |=  ((4U << 12) | (4U << 15));
-
-    mmio_write32(GPIO_BASE + GPIO_GPFSEL1, value);
-
-    /*
-     * GPIO14とGPIO15のpull-up/downを無効化する。
-     *
-     * GPIO14:
-     *   GPPUPPDN0 bits 28-29
-     *
-     * GPIO15:
-     *   GPPUPPDN0 bits 30-31
-     *
-     * 0b00:
-     *   pullなし
-     */
-    value = mmio_read32(GPIO_BASE + GPIO_PUP_PDN0);
-
-    value &= ~((3U << 28) | (3U << 30));
-
-    mmio_write32(GPIO_BASE + GPIO_PUP_PDN0, value);
-
-    mmio_dmb();
 }
 
 static int pl011_init(struct uart_device *dev)
@@ -145,7 +102,7 @@ static int pl011_init(struct uart_device *dev)
     /*
      * GPIO14/15をTXD0/RXD0へ接続する。
      */
-    pl011_configure_gpio();
+    /* Pin routing is configured by platform_init(). */
 
     /*
      * UARTクロック48 MHz、115200 baud。
@@ -224,24 +181,20 @@ static void pl011_putc(struct uart_device *dev, char c)
     );
 }
 
-static char pl011_getc(struct uart_device *dev)
+static void pl011_enable_rx_irq(struct uart_device *dev)
 {
-    uintptr_t base;
-    uint32_t value;
-
-    if (dev == NULL) {
-        return '\0';
+    mmio_write32(dev->base_address + UART_ICR, 0x7FFU);
+    mmio_write32(dev->base_address + UART_IMSC, (1U << 4) | (1U << 6) | (1U << 10));
+    mmio_dsb();
+}
+static void pl011_handle_irq(struct uart_device *dev)
+{
+    for (unsigned int budget = 0; budget < 64; ++budget) {
+        if (mmio_read32(dev->base_address + UART_FR) & UART_FR_RXFE) break;
+        uint32_t data = mmio_read32(dev->base_address + UART_DR);
+        if (data & 0xF00U) uart_rx_overrun(dev);
+        else uart_rx_push(dev, (char)data);
     }
-
-    base = dev->base_address;
-
-    /*
-     * RX FIFOにデータが入るまで待つ。
-     */
-    while ((mmio_read32(base + UART_FR) & UART_FR_RXFE) != 0U) {
-    }
-
-    value = mmio_read32(base + UART_DR);
-
-    return (char)(value & 0xFFU);
+    mmio_write32(dev->base_address + UART_ICR, 0x7FFU);
+    mmio_dsb();
 }

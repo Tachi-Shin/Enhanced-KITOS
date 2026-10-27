@@ -21,7 +21,6 @@ int sd_read_blocks(struct sd_card *card, uint64_t lba,
 int sd_write_blocks(struct sd_card *card, uint64_t lba,
                     uint32_t count, const void *buffer);
 
-struct block_device *sd_get_qemu_block_device(void);
-struct block_device *sd_get_emmc2_block_device(void);
+void sd_block_setup(struct block_device *device, struct sd_card *card, const char *name);
 
 #endif

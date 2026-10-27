@@ -2,7 +2,7 @@
 
 #include <dos/type.h>
 
-#include <arch/arm64/rpi4/mmio.h>
+#include <arch/io.h>
 
 #include <drivers/uart/uart.h>
 #include <drivers/uart/mini_uart/mini_uart.h>
@@ -42,14 +42,12 @@
 
 static int mini_uart_init(struct uart_device *dev);
 static void mini_uart_putc(struct uart_device *dev, char c);
-static char mini_uart_getc(struct uart_device *dev);
 static void mini_uart_enable_rx_irq(struct uart_device *dev);
 static void mini_uart_handle_irq(struct uart_device *dev);
 
 static const struct uart_ops mini_uart_ops = {
     .init = mini_uart_init,
     .putc = mini_uart_putc,
-    .getc = mini_uart_getc,
     .enable_rx_irq = mini_uart_enable_rx_irq,
     .handle_irq = mini_uart_handle_irq,
 };
@@ -64,40 +62,6 @@ static struct uart_device mini_uart_device = {
 struct uart_device *mini_uart_get_device(void)
 {
     return &mini_uart_device;
-}
-
-static void mini_uart_configure_gpio(void)
-{
-    uint32_t value;
-
-    /*
-     * GPIO14とGPIO15をALT5に設定する。
-     *
-     * GPIO14:
-     *   bits 12-14
-     *
-     * GPIO15:
-     *   bits 15-17
-     *
-     * ALT5 = 0b010
-     */
-    value = mmio_read32(GPIO_BASE + GPIO_GPFSEL1);
-
-    value &= ~((7U << 12) | (7U << 15));
-    value |=  ((2U << 12) | (2U << 15));
-
-    mmio_write32(GPIO_BASE + GPIO_GPFSEL1, value);
-
-    /*
-     * GPIO14とGPIO15のpull-up/downを無効化する。
-     */
-    value = mmio_read32(GPIO_BASE + GPIO_PUP_PDN0);
-
-    value &= ~((3U << 28) | (3U << 30));
-
-    mmio_write32(GPIO_BASE + GPIO_PUP_PDN0, value);
-
-    mmio_dsb();
 }
 
 static int mini_uart_init(struct uart_device *dev)
@@ -143,7 +107,7 @@ static int mini_uart_init(struct uart_device *dev)
     /*
      * GPIO14/15をMini UARTへ接続する。
      */
-    mini_uart_configure_gpio();
+    /* Pin routing is configured by platform_init(). */
 
     /*
      * core_freq = 250 MHz、baud = 115200の場合:
@@ -184,23 +148,6 @@ static void mini_uart_putc(struct uart_device *dev, char c)
         dev->base_address,
         (uint32_t)(uint8_t)c
     );
-}
-
-static char mini_uart_getc(struct uart_device *dev)
-{
-    uint32_t value;
-
-    if (dev == NULL) {
-        return '\0';
-    }
-
-    while ((mmio_read32(AUX_MU_LSR_REG) &
-            AUX_MU_LSR_DATA_READY) == 0U) {
-    }
-
-    value = mmio_read32(dev->base_address);
-
-    return (char)(value & 0xFFU);
 }
 
 static void mini_uart_enable_rx_irq(struct uart_device *dev)

@@ -45,8 +45,6 @@ static const struct block_device_ops file_ops = {
     .write = file_write,
 };
 
-struct block_device *sd_get_qemu_block_device(void) { return NULL; }
-struct block_device *sd_get_emmc2_block_device(void) { return NULL; }
 
 static int open_device(const char *path, struct block_device *device,
                        struct file_context *context)

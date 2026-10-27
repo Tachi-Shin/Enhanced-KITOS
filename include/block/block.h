@@ -25,7 +25,8 @@ struct block_device {
     bool initialized;
 };
 
-void block_register_devices(void);
+/* Boot-time registration; devices must have static lifetime. */
+int block_register(struct block_device *device);
 struct block_device *block_get_device(unsigned int index);
 
 int block_init(struct block_device *device);

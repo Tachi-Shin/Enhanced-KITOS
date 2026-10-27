@@ -1,6 +1,6 @@
 // arch/arm64/kernel/context.c
 
-#include <arch/arm64/kernel/context.h>
+#include <arch/context.h>
 #include <stddef.h>
 
 void arch_context_init(

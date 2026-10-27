@@ -1,34 +1,28 @@
-#ifndef EXCEPTION_H
-#define EXCEPTION_H
-
+#ifndef ARCH_ARM64_EXCEPTION_H
+#define ARCH_ARM64_EXCEPTION_H
+#define EXCEPTION_FRAME_SIZE 816
+#define FRAME_FP 288
+#define FRAME_FPCR 800
+#define FRAME_FPSR 808
+#define FRAME_SP 248
+#define FRAME_PC 256
+#define FRAME_PSTATE 264
+#define FRAME_ESR 272
+#define FRAME_FAR 280
+#ifndef __ASSEMBLER__
 #include <dos/type.h>
-
-// ---------------------------------------------------------------------------
-// IRQ番号定義
-// ---------------------------------------------------------------------------
-// 30: Generic Timer (EL1物理タイマ)
-// 153: UART PL011 (RPi4)
-// 1023: spurious interrupt (無視する)
-#define IRQ_TIMER       30
-#define IRQ_UART_PL011  153
-#define IRQ_SPURIOUS    1023
-#define IRQ_EMMC2       158
-
-// ESR_EL1 EC フィールド (bit[31:26])
-#define ESR_EC_SHIFT        26
-#define ESR_EC_MASK         0x3FUL
-#define ESR_EC_DATA_ABORT   0x25    // Data Abort (EL1)
-#define ESR_EC_INST_ABORT   0x21    // Instruction Abort (EL1)
-#define ESR_EC_SVC64        0x15    // SVC命令 (AArch64)
-#define ESR_EC_UNKNOWN      0x00    // 未知
-
+struct exception_frame {
+    uint64_t x[31];
+    uint64_t sp, pc, pstate, esr, far;
+    uint64_t q[32][2], fpcr, fpsr;
+};
+_Static_assert(sizeof(struct exception_frame) == EXCEPTION_FRAME_SIZE, "exception frame size");
+_Static_assert(__builtin_offsetof(struct exception_frame, sp) == FRAME_SP, "exception frame SP");
+_Static_assert(__builtin_offsetof(struct exception_frame, far) == FRAME_FAR, "exception frame FAR");
 extern char vector_table[];
-
-void SetVectorTable(void);
+void arch_exception_init(void);
 void irq_dispatch(void);
-void sync_dispatch(uint64_t esr, uint64_t far);
-
-void DisableInt(void);
-void EnableInt(void);
-
+void sync_dispatch(struct exception_frame *frame);
+void exception_fatal(struct exception_frame *frame) __attribute__((noreturn));
+#endif
 #endif

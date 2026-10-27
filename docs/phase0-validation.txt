@@ -1,0 +1,26 @@
+Enhanced KITOS Phase 0 validation — 2026-10-27 (Asia/Tokyo)
+
+Toolchain: aarch64-elf-gcc (GCC) 15.2.0
+Emulator: QEMU emulator version 10.2.2
+
+hardware/qemu clean builds: PASS (-Wall -Wextra -Werror)
+
+block LBA read/write test: PASS
+FAT32 direct/MBR, 8.3/LFN, read/write test: PASS
+VFS/FAT32 extended: PASS (7321 checks)
+timer deadlines/cancel/rearm/budget/wrap: PASS (79 checks)
+BCM2711 SDHCI 32-bit MMIO/PIO/errors/timeouts/clocks: PASS (1873 checks)
+SD v1/v2/capacity/addressing/retry/timeout: PASS (1031 checks)
+VFS/FAT32 extended: PASS (7321 checks)
+VFS/FAT32 extended: PASS (7321 checks)
+VFS/FAT32 extended: PASS (7321 checks)
+
+QEMU boot/UART/IRQ/preempt/sleep/reuse/SD/VFS/persistence/no-media: PASS
+
+Clang static analysis FAT32/VFS: PASS (0 diagnostics)
+Legacy source preservation against HEAD: PASS
+Real Raspberry Pi 4 execution: NOT TESTED
+
+   text	   data	    bss	    dec	    hex	filename
+  58592	   2440	 704080	 765112	  bacb8	build/rpi4/qemu/kernel8.elf
+  59472	   2440	 704128	 766040	  bb058	build/rpi4/hardware/kernel8.elf

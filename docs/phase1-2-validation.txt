@@ -1,0 +1,71 @@
+Enhanced KITOS Phase 1 / Phase 2 validation — 2026-10-27 (Asia/Tokyo)
+
+Environment:
+aarch64-elf-gcc (GCC) 15.2.0
+QEMU emulator version 10.2.2
+Apple clang version 21.0.0 (clang-2100.3.34.2)
+
+Builds: PASS (-Wall -Wextra -Werror)
+  make TARGET=qemu -j4
+  make TARGET=hardware -j4
+
+Host regression: make test — PASS
+  block LBA read/write test: PASS
+  FAT32 direct/MBR, 8.3/LFN, read/write test: PASS
+  VFS/FAT32 extended: PASS (7321 checks)
+  timer deadlines/cancel/rearm/budget/wrap: PASS (79 checks)
+  BCM2711 SDHCI 32-bit MMIO/PIO/errors/timeouts/clocks: PASS (1873 checks)
+  SD v1/v2/capacity/addressing/retry/timeout: PASS (1031 checks)
+  VFS/FAT32 extended: PASS (7321 checks)
+  VFS/FAT32 extended: PASS (7321 checks)
+  VFS/FAT32 extended: PASS (7321 checks)
+  page allocator: 2636 checks PASS
+  boot memory: 22608 checks PASS
+
+QEMU regression — PASS:
+  python3 tools/qemu_test.py --qemu /Users/shingo/qemu-10.2.2/bin/qemu-system-aarch64 --kernel build/rpi4/qemu/kernel8.img
+  Boot, UART RX/TX, IRQ, EL1 preemption/sleep/stop/resume/kill/reuse/resource pins.
+  FAT32/VFS read/write/append/truncate/rename/mkdir/rmdir, restart persistence.
+  Host mcopy exact contents and read-only fsck_msdos: PASS; no user SD image used.
+  No-media boot and monitor availability.
+  memtest: 8258 checks, CPU AT/PAR protection probes, private mappings, zero-fill,
+    cross-page copy, full-range validation, RX write rejection, boundary/overflow,
+    unmap and table/page reclamation.
+  usertest: independent TTBR0 at identical VA, non-yielding EL0 preemption,
+    stop/resume/sleep/kill cancellation; syscall, Newlib-compatible errors,
+    GPR/SP preservation, user sleep/clock, user-buffer access checks.
+  Fault isolation: kernel reads, text writes, NX execution, user stack guard,
+    privileged register access, removed identity alias, NULL, MMIO, kernel execution.
+  Normal exit/fault/kill reclamation: free=244871, baseline=244871 (ordinary boot).
+  ATAG boot, DTB reservations/initrd, and 16 MiB usable-memory DTB: PASS.
+  OOM rollback at data/each intermediate table allocation, unmap/retry: PASS.
+    free=3677, baseline=3677 (small-memory boot).
+  Detailed serial transcript: build/tests/qemu-transcript.txt
+
+Additional existing firmware DTB boot — PASS:
+  -dtb image/arm64/bcm2711-rpi-4-b.dtb; no SD image.
+  memtest and usertest passed. QEMU disables its unsupported DTB device nodes.
+  Serial transcript: build/tests/qemu-firmware-dtb.txt
+
+Static analysis — PASS, zero diagnostics:
+  clang --analyze --target=aarch64-none-elf -Iinclude -Iarch/arm64/include -ffreestanding
+    -Xanalyzer -analyzer-output=text kernel/mm/page.c kernel/mm/boot_memory.c
+    kernel/mm/usercopy.c arch/arm64/kernel/paging.c kernel/syscall/syscall.c kernel/sched/task.c
+
+ELF inspection — PASS:
+  Entry 0x80000; RX/R/RW program segments, no RWX segment.
+  Kernel text VMA 0xffff000000084000, LMA 0x84000.
+  Physical kernel end 0x191000. High boot stack guard 0xffff000000180000.
+  High stack end 0xffff000000191000.
+text	   data	    bss	    dec	    hex	filename
+  82740	   2440	1024000	1109180	 10ecbc	build/rpi4/qemu/kernel8.elf
+  83300	   2440	1024000	1109740	 10eeec	build/rpi4/hardware/kernel8.elf
+
+Working tree whitespace: git diff --check — PASS.
+
+Limitations:
+  Physical Raspberry Pi 4 execution: NOT TESTED. Hardware result is build-only.
+  UEFI x64 / Pi 5 ports: NOT IMPLEMENTED; arch/platform interfaces prepared.
+  Single core, one managed low ARM RAM bank, 4 KiB pages, no ASID allocation.
+  FP/SIMD, COW, demand paging, SMP, ELF loader and Newlib linking are not implemented.
+  Newlib is the selected user C library; this phase supplies its initial syscall ABI.

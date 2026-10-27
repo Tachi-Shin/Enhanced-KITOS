@@ -3,25 +3,17 @@
 #include <kernel/printk.h>
 
 #include <dos/type.h>
-#include <drivers/uart/uart.h>
+#include <kernel/console.h>
 
 #include <stdarg.h>
 
 #define PRINTK_BUFFER_SIZE 4096U
-
-static char printk_buffer[PRINTK_BUFFER_SIZE];
-static struct uart_device *printk_console = NULL;
 
 struct format_buffer {
     char *data;
     size_t size;
     size_t position;
 };
-
-void printk_set_console(struct uart_device *dev)
-{
-    printk_console = dev;
-}
 
 static void buffer_putc(struct format_buffer *buffer, char c)
 {
@@ -277,30 +269,12 @@ static void format(
     buffer.data[buffer.position] = '\0';
 }
 
-static void printk_write(const char *string)
-{
-    if (printk_console == NULL || string == NULL) {
-        return;
-    }
-
-    while (*string != '\0') {
-        /*
-         * UART端末の改行コードをCR+LFへ変換する。
-         */
-        if (*string == '\n') {
-            uart_putc(printk_console, '\r');
-        }
-
-        uart_putc(printk_console, *string);
-        string++;
-    }
-}
-
 void printk(const char *format_string, ...)
 {
+    char printk_buffer[PRINTK_BUFFER_SIZE];
     va_list arguments;
 
-    if (printk_console == NULL || format_string == NULL) {
+    if (format_string == NULL) {
         return;
     }
 
@@ -314,5 +288,5 @@ void printk(const char *format_string, ...)
 
     va_end(arguments);
 
-    printk_write(printk_buffer);
+    console_write(printk_buffer);
 }

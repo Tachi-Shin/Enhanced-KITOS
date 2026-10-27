@@ -37,17 +37,6 @@ static const struct block_device_ops memory_ops = {
     .write = memory_write,
 };
 
-/* block.cの固定デバイス登録がリンクできるようにするテスト用stub。 */
-struct block_device *sd_get_qemu_block_device(void)
-{
-    return NULL;
-}
-
-struct block_device *sd_get_emmc2_block_device(void)
-{
-    return NULL;
-}
-
 int main(void)
 {
     struct block_device device = {

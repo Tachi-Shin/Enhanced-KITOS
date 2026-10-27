@@ -1,17 +1,22 @@
 #include <dos/type.h>
 
-#include <arch/arm64/kernel/irq.h>
+#include <arch/irq.h>
 
 #include <drivers/uart/uart.h>
-#include <drivers/uart/mini_uart/mini_uart.h>
 
-#include <kernel/task.h>
+
+
 
 static struct uart_device *uart_devices[UART_DEVICE_COUNT];
 
-void uart_register_devices(void)
+int uart_register(struct uart_device *device)
 {
-    uart_devices[0] = mini_uart_get_device();
+    if (!device) return -1;
+    for (unsigned int i = 0; i < UART_DEVICE_COUNT; ++i) {
+        if (uart_devices[i] == device) return 0;
+        if (!uart_devices[i]) { uart_devices[i] = device; return 0; }
+    }
+    return -1;
 }
 
 struct uart_device *uart_get_device(unsigned int index)
@@ -39,41 +44,6 @@ void uart_putc(struct uart_device *dev, char c)
 {
     if (dev != NULL && dev->ops != NULL && dev->ops->putc != NULL) {
         dev->ops->putc(dev, c);
-    }
-}
-
-/*
- * 従来の、文字を待つAPI。
- * 割込み方式では、IRQが有効な通常のタスクから呼ぶこと。
- * 割込みハンドラ内からは呼ばない。
- *
- * 新しい受信処理には、状態を区別できるuart_try_getc()を使う。
- */
-char uart_getc(struct uart_device *dev)
-{
-    char c;
-    int result;
-
-    if (dev == NULL || dev->ops == NULL || dev->ops->getc == NULL) {
-        return '\0';
-    }
-
-    if (!dev->rx_irq_enabled) {
-        return dev->ops->getc(dev);
-    }
-
-    for (;;) {
-        result = uart_try_getc(dev, &c);
-
-        if (result == 1) {
-            return c;
-        }
-
-        if (result < 0) {
-            return '\0';
-        }
-
-        task_yield();
     }
 }
 

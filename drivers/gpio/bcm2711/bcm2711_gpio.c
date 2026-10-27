@@ -1,3 +1,4 @@
+#include <arch/io.h>
 #include <drivers/gpio/bcm2711/bcm2711_gpio.h>
 
 #if !defined(__aarch64__)
@@ -12,6 +13,7 @@
 #define GPIO_REGISTER_END    0xF3U
 
 const struct gpio_device bcm2711_gpio_device = {
+    .ops = &bcm2711_gpio_ops,
     .base = (uintptr_t)0xFE200000UL,
     .pin_count = 28U
 };
@@ -52,11 +54,8 @@ static void gpio_barrier(void)
 
 static uint32_t gpio_mmio_read(uintptr_t offset)
 {
-    volatile uint32_t *reg =
-        (volatile uint32_t *)(active_gpio.base + offset);
-
     gpio_barrier();
-    uint32_t value = *reg;
+    uint32_t value = mmio_read32(active_gpio.base + offset);
     gpio_barrier();
 
     return value;
@@ -64,11 +63,8 @@ static uint32_t gpio_mmio_read(uintptr_t offset)
 
 static void gpio_mmio_write(uintptr_t offset, uint32_t value)
 {
-    volatile uint32_t *reg =
-        (volatile uint32_t *)(active_gpio.base + offset);
-
     gpio_barrier();
-    *reg = value;
+    mmio_write32(active_gpio.base + offset, value);
     gpio_barrier();
 }
 
@@ -204,8 +200,42 @@ static int bcm2711_pin_mode(unsigned int pin_num, enum gpio_mode mode)
     return result;
 }
 
+static int bcm2711_set_function(unsigned int pin, enum gpio_function function)
+{
+    static const uint8_t encoding[] = {0, 1, 4, 5, 6, 7, 3, 2};
+    if (function < GPIO_FUNCTION_INPUT || function > GPIO_ALT5) return GPIO_EINVAL;
+    if (function < 2U) return bcm2711_pin_mode(pin, (enum gpio_mode)function);
+    uint64_t flags = gpio_lock();
+    int rc = gpio_check_pin(pin);
+    if (!rc) {
+        uintptr_t offset = GPIO_GPFSEL0 + (pin / 10U) * 4U;
+        unsigned int shift = (pin % 10U) * 3U;
+        uint32_t value = gpio_mmio_read(offset);
+        gpio_mmio_write(offset, (value & ~(7U << shift)) | ((uint32_t)encoding[function] << shift));
+    }
+    gpio_unlock(flags);
+    return rc;
+}
+
+static int bcm2711_set_pull(unsigned int pin, enum gpio_pull pull)
+{
+    if (pull > GPIO_PULL_DOWN || pull < GPIO_PULL_NONE) return GPIO_EINVAL;
+    uint64_t flags = gpio_lock();
+    int rc = gpio_check_pin(pin);
+    if (rc == 0) {
+        uintptr_t offset = 0xE4U + (pin / 16U) * 4U;
+        unsigned int shift = (pin % 16U) * 2U;
+        uint32_t value = gpio_mmio_read(offset);
+        gpio_mmio_write(offset, (value & ~(3U << shift)) | ((uint32_t)pull << shift));
+    }
+    gpio_unlock(flags);
+    return rc;
+}
+
 const struct gpio_backend_ops bcm2711_gpio_ops = {
     .init = bcm2711_init,
+    .set_function = bcm2711_set_function,
+    .set_pull = bcm2711_set_pull,
     .read = bcm2711_read,
     .write = bcm2711_write,
     .pin_mode = bcm2711_pin_mode

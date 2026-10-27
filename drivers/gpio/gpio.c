@@ -1,23 +1,18 @@
 #include <drivers/gpio/gpio.h>
-#include <drivers/gpio/bcm2711/bcm2711_gpio.h>
-
-/* KITOSのRaspberry Pi 4B構成ではBCM2711ドライバを使用する。 */
-int gpio_init(const struct gpio_device *gpio_device)
+static const struct gpio_backend_ops *backend;
+int gpio_init(const struct gpio_device *device)
 {
-    return bcm2711_gpio_ops.init(gpio_device);
+    if (!device || !device->ops || !device->ops->init) return GPIO_EINVAL;
+    int rc = device->ops->init(device);
+    if (!rc) backend = device->ops;
+    return rc;
 }
-
-int gpio_read(unsigned int pin_num)
-{
-    return bcm2711_gpio_ops.read(pin_num);
-}
-
-int gpio_write(unsigned int pin_num, enum gpio_level level)
-{
-    return bcm2711_gpio_ops.write(pin_num, level);
-}
-
-int gpio_pinMode(unsigned int pin_num, enum gpio_mode mode)
-{
-    return bcm2711_gpio_ops.pin_mode(pin_num, mode);
-}
+int gpio_read(unsigned int pin) { return backend ? backend->read(pin) : GPIO_ENODEV; }
+int gpio_write(unsigned int pin, enum gpio_level level)
+{ return backend ? backend->write(pin, level) : GPIO_ENODEV; }
+int gpio_pinMode(unsigned int pin, enum gpio_mode mode)
+{ return backend ? backend->pin_mode(pin, mode) : GPIO_ENODEV; }
+int gpio_set_pull(unsigned int pin, enum gpio_pull pull)
+{ return backend && backend->set_pull ? backend->set_pull(pin, pull) : GPIO_ENODEV; }
+int gpio_set_function(unsigned int pin, enum gpio_function function)
+{ return backend && backend->set_function ? backend->set_function(pin, function) : GPIO_ENODEV; }

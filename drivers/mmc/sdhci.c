@@ -1,4 +1,6 @@
-#include <arch/arm64/rpi4/mmio.h>
+#include <arch/io.h>
+#include <kernel/clock.h>
+#include <kernel/error.h>
 #include <drivers/mmc/sdhci.h>
 
 #define SDHCI_BLOCK_SIZE_COUNT       0x04U
@@ -49,83 +51,72 @@
 #define SDHCI_CMD_INDEX              (1U << 4)
 #define SDHCI_CMD_DATA               (1U << 5)
 
-#define SDHCI_TIMEOUT_LOOPS          10000000U
+#define SDHCI_TIMEOUT_MS 1000U
 
 static int sdhci_wait_clear(struct sdhci_host *host, uint32_t mask)
 {
-    unsigned int timeout;
+    uint64_t start = clock_ms();
 
-    for (timeout = 0U; timeout < SDHCI_TIMEOUT_LOOPS; timeout++) {
-        if ((mmio_read32(host->base_address + SDHCI_PRESENT_STATE) & mask) == 0U) {
+    while (clock_ms() - start < SDHCI_TIMEOUT_MS) {
+        if ((sdhci_read32(host, SDHCI_PRESENT_STATE) & mask) == 0U) {
             return 0;
         }
     }
-    return -1;
+    return -K_ETIMEDOUT;
 }
 
 static int sdhci_wait_interrupt(struct sdhci_host *host, uint32_t wanted)
 {
-    unsigned int timeout;
+    uint64_t start = clock_ms();
     uint32_t status;
 
-    for (timeout = 0U; timeout < SDHCI_TIMEOUT_LOOPS; timeout++) {
-        status = mmio_read32(host->base_address + SDHCI_INT_STATUS);
+    while (clock_ms() - start < SDHCI_TIMEOUT_MS) {
+        status = sdhci_read32(host, SDHCI_INT_STATUS);
         if ((status & SDHCI_INT_ERROR_MASK) != 0U) {
-            mmio_write32(host->base_address + SDHCI_INT_STATUS, status);
-            return -1;
+            host->last_error = status;
+            sdhci_write32(host, SDHCI_INT_STATUS, status);
+            return -K_EIO;
         }
         if ((status & wanted) != 0U) {
-            mmio_write32(host->base_address + SDHCI_INT_STATUS, wanted);
+            sdhci_write32(host, SDHCI_INT_STATUS, wanted);
             return 0;
         }
     }
-    return -1;
+    return -K_ETIMEDOUT;
 }
 
 static int sdhci_wait_data_done(struct sdhci_host *host)
 {
-    unsigned int timeout;
+    uint64_t start = clock_ms();
     uint32_t status;
 
-    for (timeout = 0U; timeout < SDHCI_TIMEOUT_LOOPS; timeout++) {
-        status = mmio_read32(host->base_address + SDHCI_INT_STATUS);
+    while (clock_ms() - start < SDHCI_TIMEOUT_MS) {
+        status = sdhci_read32(host, SDHCI_INT_STATUS);
         if ((status & SDHCI_INT_ERROR_MASK) != 0U) {
-            mmio_write32(host->base_address + SDHCI_INT_STATUS, status);
-            return -1;
+            host->last_error = status;
+            sdhci_write32(host, SDHCI_INT_STATUS, status);
+            return -K_EIO;
         }
-        if ((status & SDHCI_INT_TRANSFER_COMPLETE) != 0U ||
-            (mmio_read32(host->base_address + SDHCI_PRESENT_STATE) &
-             SDHCI_STATE_DAT_INHIBIT) == 0U) {
-            mmio_write32(host->base_address + SDHCI_INT_STATUS,
+        if ((status & SDHCI_INT_TRANSFER_COMPLETE) != 0U) {
+            sdhci_write32(host, SDHCI_INT_STATUS,
                          SDHCI_INT_TRANSFER_COMPLETE);
             return 0;
         }
     }
-    return -1;
+    return -K_ETIMEDOUT;
 }
 
 static int sdhci_reset_lines(struct sdhci_host *host, uint8_t mask)
 {
-    unsigned int timeout;
+    uint64_t start = clock_ms();
 
-    mmio_write8(host->base_address + SDHCI_SOFTWARE_RESET, mask);
-    for (timeout = 0U; timeout < SDHCI_TIMEOUT_LOOPS; timeout++) {
-        if ((mmio_read8(host->base_address + SDHCI_SOFTWARE_RESET) & mask) == 0U) {
+    sdhci_write8(host, SDHCI_SOFTWARE_RESET, mask);
+    while (clock_ms() - start < SDHCI_TIMEOUT_MS) {
+        if ((sdhci_read8(host, SDHCI_SOFTWARE_RESET) & mask) == 0U) {
             return 0;
         }
     }
-    return -1;
-}
-
-void sdhci_setup(struct sdhci_host *host, uintptr_t base_address)
-{
-    if (host == NULL) {
-        return;
-    }
-    host->base_address = base_address;
-    host->input_clock_hz = 0U;
-    host->current_clock_hz = 0U;
-    host->version = 0U;
+    return -K_ETIMEDOUT;
 }
 
 int sdhci_set_clock(struct sdhci_host *host, uint32_t frequency_hz)
@@ -133,81 +124,78 @@ int sdhci_set_clock(struct sdhci_host *host, uint32_t frequency_hz)
     uint32_t divisor;
     uint32_t encoded_divisor;
     uint16_t clock;
-    unsigned int timeout;
+    uint64_t start = clock_ms();
 
     if (host == NULL || frequency_hz == 0U || host->input_clock_hz == 0U) {
-        return -1;
+        return -K_EINVAL;
     }
 
-    clock = mmio_read16(host->base_address + SDHCI_CLOCK_CONTROL);
+    clock = sdhci_read16(host, SDHCI_CLOCK_CONTROL);
     clock &= (uint16_t)~SDHCI_CLOCK_CARD_ENABLE;
-    mmio_write16(host->base_address + SDHCI_CLOCK_CONTROL, clock);
+    sdhci_write16(host, SDHCI_CLOCK_CONTROL, clock);
 
-    divisor = (host->input_clock_hz + frequency_hz - 1U) / frequency_hz;
-    if (divisor > 1U) {
-        if ((divisor & 1U) != 0U) {
-            divisor++;
-        }
-        encoded_divisor = divisor / 2U;
-    } else {
-        encoded_divisor = 0U;
-    }
-    if (encoded_divisor > 0x3FFU) {
-        encoded_divisor = 0x3FFU;
-    }
+    divisor = (uint32_t)(((uint64_t)host->input_clock_hz + frequency_hz - 1U) / frequency_hz);
+    if ((host->version & 0xFFU) < 2U) {
+        uint32_t power = 1U;
+        while (power < divisor && power < 256U) power <<= 1;
+        if (power < divisor) return -K_EINVAL;
+        divisor = power;
+    } else if (divisor > 1U && (divisor & 1U)) ++divisor;
+    encoded_divisor = divisor > 1U ? divisor / 2U : 0U;
+    if (encoded_divisor > 0x3FFU) return -K_EINVAL;
 
     clock = (uint16_t)SDHCI_CLOCK_INT_ENABLE;
     clock |= (uint16_t)((encoded_divisor & 0xFFU) << 8);
     clock |= (uint16_t)((encoded_divisor & 0x300U) >> 2);
-    mmio_write16(host->base_address + SDHCI_CLOCK_CONTROL, clock);
+    sdhci_write16(host, SDHCI_CLOCK_CONTROL, clock);
 
-    for (timeout = 0U; timeout < SDHCI_TIMEOUT_LOOPS; timeout++) {
-        clock = mmio_read16(host->base_address + SDHCI_CLOCK_CONTROL);
+    while (clock_ms() - start < SDHCI_TIMEOUT_MS) {
+        clock = sdhci_read16(host, SDHCI_CLOCK_CONTROL);
         if ((clock & SDHCI_CLOCK_INT_STABLE) != 0U) {
             clock |= (uint16_t)SDHCI_CLOCK_CARD_ENABLE;
-            mmio_write16(host->base_address + SDHCI_CLOCK_CONTROL, clock);
-            host->current_clock_hz = frequency_hz;
+            sdhci_write16(host, SDHCI_CLOCK_CONTROL, clock);
+            host->current_clock_hz = host->input_clock_hz / (divisor ? divisor : 1U);
             return 0;
         }
     }
-    return -1;
+    return -K_ETIMEDOUT;
 }
 
 int sdhci_init(struct sdhci_host *host)
 {
     uint32_t capabilities;
     uint32_t base_clock_mhz;
-    unsigned int timeout;
+    uint64_t start = clock_ms();
 
     if (host == NULL || host->base_address == 0UL) {
-        return -1;
+        return -K_EIO;
     }
-    if (sdhci_reset_lines(host, SDHCI_RESET_ALL) != 0) {
-        return -1;
-    }
+    int rc = sdhci_reset_lines(host, SDHCI_RESET_ALL);
+    if (rc) return rc;
 
-    host->version = mmio_read16(host->base_address + SDHCI_HOST_VERSION);
-    capabilities = mmio_read32(host->base_address + SDHCI_CAPABILITIES);
+    host->version = sdhci_read16(host, SDHCI_HOST_VERSION);
+    capabilities = sdhci_read32(host, SDHCI_CAPABILITIES);
     base_clock_mhz = (capabilities >> 8) & 0xFFU;
-    host->input_clock_hz = base_clock_mhz == 0U ? 100000000U
-                                                : base_clock_mhz * 1000000U;
+    if (!host->input_clock_hz) host->input_clock_hz = base_clock_mhz * 1000000U;
+    if (!host->input_clock_hz) return -K_ENODEV;
 
-    mmio_write8(host->base_address + SDHCI_POWER_CONTROL, 0x0FU);
-    mmio_write8(host->base_address + SDHCI_TIMEOUT_CONTROL, 0x0EU);
-    mmio_write32(host->base_address + SDHCI_INT_STATUS, 0xFFFFFFFFU);
-    mmio_write32(host->base_address + SDHCI_INT_STATUS_ENABLE, 0xFFFFFFFFU);
-    mmio_write32(host->base_address + SDHCI_INT_SIGNAL_ENABLE, 0U);
+    sdhci_write8(host, SDHCI_POWER_CONTROL, 0x0FU);
+    sdhci_write8(host, SDHCI_TIMEOUT_CONTROL, 0x0EU);
+    sdhci_write32(host, SDHCI_INT_STATUS, 0xFFFFFFFFU);
+    sdhci_write32(host, SDHCI_INT_STATUS_ENABLE, 0xFFFFFFFFU);
+    sdhci_write32(host, SDHCI_INT_SIGNAL_ENABLE, 0U);
 
-    if (sdhci_set_clock(host, 400000U) != 0) {
-        return -1;
-    }
-    for (timeout = 0U; timeout < SDHCI_TIMEOUT_LOOPS; timeout++) {
-        if ((mmio_read32(host->base_address + SDHCI_PRESENT_STATE) &
+    rc = sdhci_set_clock(host, 400000U);
+    if (rc) return rc;
+    clock_delay_us(1000U); /* power/initial clock stabilization */
+    start = clock_ms();
+    while (clock_ms() - start < SDHCI_TIMEOUT_MS) {
+        if ((sdhci_read32(host, SDHCI_PRESENT_STATE) &
              SDHCI_STATE_CARD_INSERTED) != 0U) {
             return 0;
         }
     }
-    return -1;
+    return -K_ETIMEDOUT;
 }
 
 static uint16_t sdhci_encode_command(const struct sdhci_command *command)
@@ -248,7 +236,7 @@ static void sdhci_read_response(struct sdhci_host *host,
 
     for (index = 0U; index < words; index++) {
         command->response[index] =
-            mmio_read32(host->base_address + SDHCI_RESPONSE + index * 4U);
+            sdhci_read32(host, SDHCI_RESPONSE + index * 4U);
     }
 }
 
@@ -261,20 +249,21 @@ static int sdhci_issue_command(struct sdhci_host *host,
     if (command->data_present || command->response_type == SDHCI_RESPONSE_48_BUSY) {
         inhibit |= SDHCI_STATE_DAT_INHIBIT;
     }
-    if (sdhci_wait_clear(host, inhibit) != 0) {
-        return -1;
-    }
+    int rc = sdhci_wait_clear(host, inhibit);
+    if (rc) { (void)sdhci_reset_lines(host, SDHCI_RESET_CMD | SDHCI_RESET_DATA); return rc; }
+    host->last_error = 0;
 
-    mmio_write32(host->base_address + SDHCI_INT_STATUS, 0xFFFFFFFFU);
-    mmio_write32(host->base_address + SDHCI_ARGUMENT, command->argument);
-    mmio_write16(host->base_address + SDHCI_TRANSFER_MODE, transfer_mode);
+    sdhci_write32(host, SDHCI_INT_STATUS, 0xFFFFFFFFU);
+    sdhci_write32(host, SDHCI_ARGUMENT, command->argument);
     mmio_dmb();
-    mmio_write16(host->base_address + SDHCI_COMMAND,
-                 sdhci_encode_command(command));
+    /* One transaction: no command is issued by a transfer-mode RMW. */
+    sdhci_write32(host, SDHCI_TRANSFER_MODE,
+                  transfer_mode | ((uint32_t)sdhci_encode_command(command) << 16));
 
-    if (sdhci_wait_interrupt(host, SDHCI_INT_COMMAND_COMPLETE) != 0) {
+    rc = sdhci_wait_interrupt(host, SDHCI_INT_COMMAND_COMPLETE);
+    if (rc) {
         (void)sdhci_reset_lines(host, SDHCI_RESET_CMD | SDHCI_RESET_DATA);
-        return -1;
+        return rc;
     }
     sdhci_read_response(host, command);
     return 0;
@@ -284,15 +273,13 @@ int sdhci_send_command(struct sdhci_host *host,
                        struct sdhci_command *command)
 {
     if (host == NULL || command == NULL || command->data_present) {
-        return -1;
+        return -K_EIO;
     }
-    if (sdhci_issue_command(host, command, 0U) != 0) {
-        return -1;
-    }
-    if (command->response_type == SDHCI_RESPONSE_48_BUSY &&
-        sdhci_wait_interrupt(host, SDHCI_INT_TRANSFER_COMPLETE) != 0) {
-        (void)sdhci_reset_lines(host, SDHCI_RESET_DATA);
-        return -1;
+    int rc = sdhci_issue_command(host, command, 0U);
+    if (rc) return rc;
+    if (command->response_type == SDHCI_RESPONSE_48_BUSY) {
+        rc = sdhci_wait_interrupt(host, SDHCI_INT_TRANSFER_COMPLETE);
+        if (rc) { (void)sdhci_reset_lines(host, SDHCI_RESET_DATA); return rc; }
     }
     return 0;
 }
@@ -310,28 +297,25 @@ int sdhci_transfer(struct sdhci_host *host, struct sdhci_command *command,
     uint32_t word;
 
     if (host == NULL || command == NULL || buffer == NULL ||
-        block_size == 0U || block_count == 0U ||
-        (block_size & 3U) != 0U || !command->data_present) {
-        return -1;
+        block_size == 0U || block_size > 2048U || block_count == 0U ||
+        block_count != 1U || (block_size & 3U) != 0U || !command->data_present) {
+        return -K_EIO;
     }
     if (!write) {
         mode |= SDHCI_TRNS_READ;
     }
-    if (block_count > 1U) {
-        mode |= SDHCI_TRNS_MULTI;
-    }
 
-    mmio_write32(host->base_address + SDHCI_BLOCK_SIZE_COUNT,
+    sdhci_write32(host, SDHCI_BLOCK_SIZE_COUNT,
                  (uint32_t)block_size | ((uint32_t)block_count << 16));
-    if (sdhci_issue_command(host, command, mode) != 0) {
-        return -1;
-    }
+    int rc = sdhci_issue_command(host, command, mode);
+    if (rc) return rc;
 
     word_count = (uint32_t)block_size / 4U;
     for (block = 0U; block < block_count; block++) {
-        if (sdhci_wait_interrupt(host, ready) != 0) {
+        rc = sdhci_wait_interrupt(host, ready);
+        if (rc) {
             (void)sdhci_reset_lines(host, SDHCI_RESET_DATA);
-            return -1;
+            return rc;
         }
         for (word = 0U; word < word_count; word++) {
             uint32_t position =
@@ -341,11 +325,11 @@ int sdhci_transfer(struct sdhci_host *host, struct sdhci_command *command,
                     ((uint32_t)bytes[position + 1U] << 8) |
                     ((uint32_t)bytes[position + 2U] << 16) |
                     ((uint32_t)bytes[position + 3U] << 24);
-                mmio_write32(host->base_address + SDHCI_BUFFER,
+                sdhci_write32(host, SDHCI_BUFFER,
                              value);
             } else {
                 uint32_t value =
-                    mmio_read32(host->base_address + SDHCI_BUFFER);
+                    sdhci_read32(host, SDHCI_BUFFER);
                 bytes[position] = (uint8_t)value;
                 bytes[position + 1U] = (uint8_t)(value >> 8);
                 bytes[position + 2U] = (uint8_t)(value >> 16);
@@ -353,9 +337,10 @@ int sdhci_transfer(struct sdhci_host *host, struct sdhci_command *command,
             }
         }
     }
-    if (sdhci_wait_data_done(host) != 0) {
+    rc = sdhci_wait_data_done(host);
+    if (rc) {
         (void)sdhci_reset_lines(host, SDHCI_RESET_DATA);
-        return -1;
+        return rc;
     }
     mmio_dmb();
     return 0;

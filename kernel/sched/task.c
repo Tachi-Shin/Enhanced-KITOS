@@ -1,37 +1,52 @@
 // kernel/sched/task.c
 #include <kernel/task.h>
-#include <arch/arm64/kernel/irq.h>
+#include <kernel/timer.h>
+#include <kernel/vm.h>
+#include <kernel/error.h>
+#include <kernel/process.h>
+#include <arch/memory.h>
+#include <arch/user.h>
+#include <arch/context.h>
+
+struct task {
+    uint32_t id;
+    char task_name[TASK_NAME_SIZE];
+
+    uint32_t state;
+
+    struct process *process;
+    bool user;
+    struct vm_space space;
+    uint64_t user_entry, user_stack, user_argument;
+    int exit_status;
+    uint64_t fault_esr, fault_address, fault_pc;
+    bool kill_pending;
+    bool protected;
+    unsigned int resources;
+
+    void (*entry)(void *);
+    void *argument;
+
+    /*
+     * スタック領域は[stack_bottom, stack_top)。
+     * stack_topは最後のバイトの直後を指す。
+     */
+    void *stack_bottom;
+    void *stack_top;
+
+    /* このタスクのsleepで使用するタイマー */
+    struct timer_event sleep_timer;
+
+    struct arch_context context;
+};
+
+
+#include <arch/irq.h>
 
 static struct task task_table[MAX_TASKS];
 
-extern char __demo_a_stack_start[];
-extern char __demo_a_stack_end[];
-extern char __demo_b_stack_start[];
-extern char __demo_b_stack_end[];
-extern char __demo_c_stack_start[];
-extern char __demo_c_stack_end[];
-extern char __demo_d_stack_start[];
-extern char __demo_d_stack_end[];
-extern char __basic_stack_start[];
-extern char __basic_stack_end[];
-extern char __editor_stack_start[];
-extern char __editor_stack_end[];
-extern char __gpio_stack_start[];
-extern char __gpio_stack_end[];
-extern char __shell_stack_start[];
-extern char __shell_stack_end[];
-
-extern void demo_a_task(void *argument);
-extern void demo_b_task(void *argument);
-extern void demo_c_task(void *argument);
-extern void demo_d_task(void *argument);
-extern void basic_task(void *argument);
-extern void editor_task(void *argument);
-extern void gpio_task(void *argument);
-extern void shell_task(void *argument);
-
-static uint8_t task_stacks[MAX_TASKS][TASK_STACK_SIZE]
-    __attribute__((aligned(16)));
+static uint8_t task_stacks[MAX_TASKS][TASK_STACK_SIZE + PAGE_SIZE]
+    __attribute__((aligned(PAGE_SIZE)));
 
 static struct task *current_task;
 static struct arch_context boot_context;
@@ -42,17 +57,11 @@ static struct arch_context boot_context;
  */
 static struct task idle_task;
 
-static uint8_t idle_stack[TASK_STACK_SIZE]
-    __attribute__((aligned(16)));
+static uint8_t idle_stack[TASK_STACK_SIZE + PAGE_SIZE]
+    __attribute__((aligned(PAGE_SIZE)));
 
 /* タスク枠を再利用しても、IDは新しく割り当てる */
 static uint32_t next_id = 1U;
-
-#define LOG_COUNT 16U
-
-static struct task_message messages[LOG_COUNT];
-static unsigned int log_head;
-static unsigned int log_tail;
 
 static void copy_text(
     char *dst,
@@ -138,17 +147,22 @@ static void switch_to_task(struct task *next)
 
     next->state = TASK_RUNNING;
     current_task = next;
+    vm_activate(next->user ? &next->space : NULL);
 
     arch_context_switch(
         &previous->context,
         &next->context
     );
+    /* This context is now on another live kernel stack. Exited user address
+     * spaces can be released without freeing the stack doing the release. */
+    task_reap();
 }
 
 static void task_bootstrap(void)
 {
     struct task *task = current_task;
 
+    task_reap();
     /* 新しいタスクのスタックに切り替わってからIRQを許可 */
     arch_irq_restore(0U);
 
@@ -199,7 +213,7 @@ int task_sleep(uint32_t id, uint32_t milliseconds)
     if (milliseconds == 0U ||
         task == NULL ||
         task == current_task ||
-        task->protected ||
+        task->protected || task->resources ||
         (task->state != TASK_READY &&
          task->state != TASK_SLEEPING)) {
         goto done;
@@ -254,6 +268,10 @@ int task_create(
             continue;
         }
 
+        vm_space_destroy(&task->space);
+        task->user = false;
+        task->exit_status = 0;
+        task->fault_esr = task->fault_address = task->fault_pc = 0;
         task->id = next_id++;
 
         copy_text(
@@ -265,39 +283,12 @@ int task_create(
         task->entry = entry;
         task->argument = argument;
 
-        task->color = 0U;
         task->protected = false;
-        task->work = 0U;
+        task->kill_pending = false;
+        task->resources = 0;
 
-        if (entry == demo_a_task) {
-            task->stack_bottom = __demo_a_stack_start;
-            task->stack_top = __demo_a_stack_end;
-        } else if (entry == demo_b_task) {
-            task->stack_bottom = __demo_b_stack_start;
-            task->stack_top = __demo_b_stack_end;
-        } else if (entry == demo_c_task) {
-            task->stack_bottom = __demo_c_stack_start;
-            task->stack_top = __demo_c_stack_end;
-        } else if (entry == demo_d_task) {
-            task->stack_bottom = __demo_d_stack_start;
-            task->stack_top = __demo_d_stack_end;
-        } else if (entry == basic_task) {
-            task->stack_bottom = __basic_stack_start;
-            task->stack_top = __basic_stack_end;
-        } else if (entry == editor_task) {
-            task->stack_bottom = __editor_stack_start;
-            task->stack_top = __editor_stack_end;
-        } else if (entry == gpio_task) {
-            task->stack_bottom = __gpio_stack_start;
-            task->stack_top = __gpio_stack_end;
-        } else if (entry == shell_task) {
-            task->stack_bottom = __shell_stack_start;
-            task->stack_top = __shell_stack_end;
-        } else {
-            /* demo_sleep など、専用領域を持たないタスク */
-            task->stack_bottom = &task_stacks[i][0];
-            task->stack_top = &task_stacks[i][TASK_STACK_SIZE];
-        }
+        task->stack_bottom = &task_stacks[i][PAGE_SIZE];
+        task->stack_top = &task_stacks[i][PAGE_SIZE + TASK_STACK_SIZE];
 
         /*
          * 再利用する枠に古いタイマーを残さない。
@@ -392,6 +383,10 @@ void task_exit(void)
     if (current_task != NULL) {
         (void)kernel_timer_cancel(&current_task->sleep_timer);
 
+        if (current_task->process) {
+            process_task_exited(current_task->process, current_task->exit_status, current_task->fault_esr);
+            current_task->process = NULL;
+        }
         current_task->state = TASK_EXITED;
 
         switch_to_task(select_next_task());
@@ -412,7 +407,7 @@ void task_start(void)
         idle_task.entry = idle_entry;
         idle_task.protected = true;
 
-        idle_task.stack_bottom = idle_stack;
+        idle_task.stack_bottom = idle_stack + PAGE_SIZE;
         idle_task.stack_top = idle_stack + sizeof(idle_stack);
 
         arch_context_init(
@@ -423,6 +418,7 @@ void task_start(void)
 
         current_task = select_next_task();
         current_task->state = TASK_RUNNING;
+        vm_activate(current_task->user ? &current_task->space : NULL);
 
         arch_context_switch(
             &boot_context,
@@ -468,6 +464,12 @@ int task_control(
         task->protected) {
         goto done;
     }
+    if (task->resources) {
+        if (operation == TASK_KILL && task->process) {
+            task->kill_pending = true; result = 0;
+        }
+        goto done;
+    }
 
     if (operation == TASK_STOP &&
         (task->state == TASK_READY ||
@@ -495,35 +497,16 @@ int task_control(
         (void)kernel_timer_cancel(&task->sleep_timer);
 
         task->state = TASK_EXITED;
+        task->exit_status = -K_ECANCELED;
+        if (task->process) {
+            process_task_exited(task->process, task->exit_status, 0);
+            task->process = NULL;
+        }
         result = 0;
     }
 
 done:
     arch_irq_restore(flags);
-    return result;
-}
-
-int task_set_color(
-    uint32_t id,
-    uint32_t color
-)
-{
-    uint64_t flags = arch_irq_save();
-
-    struct task *task = find_task(id);
-    int result = -1;
-
-    if (
-        task != NULL &&
-        task->state != TASK_EXITED &&
-        color < TASK_COLOR_COUNT
-    ) {
-        task->color = color;
-        result = 0;
-    }
-
-    arch_irq_restore(flags);
-
     return result;
 }
 
@@ -537,6 +520,7 @@ unsigned int task_snapshot(
     }
 
     uint64_t flags = arch_irq_save();
+    task_reap();
     unsigned int n = 0U;
 
     for (
@@ -552,8 +536,11 @@ unsigned int task_snapshot(
 
         out[n].id = task->id;
         out[n].state = task->state;
-        out[n].color = task->color;
-        out[n].work = task->work;
+        out[n].user = task->user;
+        out[n].exit_status = task->exit_status;
+        out[n].fault_esr = task->fault_esr;
+        out[n].fault_address = task->fault_address;
+        out[n].fault_pc = task->fault_pc;
 
         out[n].stack_bottom = task->stack_bottom;
         out[n].stack_top = task->stack_top;
@@ -572,67 +559,91 @@ unsigned int task_snapshot(
     return n;
 }
 
-void task_work(void)
+/* Called with IRQ masked by the gate implementation. */
+void task_resource_get(void) { if (current_task) ++current_task->resources; }
+void task_resource_put(void) { if (current_task && current_task->resources) --current_task->resources; }
+
+int task_init_stacks(void)
 {
-    if (current_task != NULL) {
-        current_task->work++;
+    for (unsigned int i = 0; i < MAX_TASKS; ++i) {
+        int rc = arch_kernel_guard(task_stacks[i]);
+        if (rc) return rc;
     }
+    return arch_kernel_guard(idle_stack);
 }
 
-/*
- * 通常のタスクから呼ぶ。
- * 最大63文字のメッセージをキューへ保存する。
- * キューが満杯なら待たずにfalseを返す。
- */
-bool task_log(const char *text)
+uint32_t task_current_id(void)
+{ return current_task ? current_task->id : 0; }
+struct vm_space *task_current_space(void)
+{ return current_task && current_task->user ? &current_task->space : NULL; }
+
+static void user_bootstrap(void *unused)
 {
-    if (text == NULL) {
-        return false;
-    }
-
-    uint64_t flags = arch_irq_save();
-
-    unsigned int next = (log_head + 1U) % LOG_COUNT;
-    bool accepted = false;
-
-    if (
-        current_task != NULL &&
-        next != log_tail
-    ) {
-        messages[log_head].id = current_task->id;
-        messages[log_head].color = current_task->color;
-
-        copy_text(
-            messages[log_head].text,
-            text,
-            TASK_LOG_SIZE
-        );
-
-        log_head = next;
-        accepted = true;
-    }
-
-    arch_irq_restore(flags);
-
-    return accepted;
+    (void)unused;
+    arch_enter_user(current_task->user_entry, current_task->user_stack, current_task->user_argument);
 }
 
-bool task_read_log(struct task_message *out)
+int task_create_user(const char *name, struct vm_space *space, uint64_t entry,
+                     uint64_t stack, uint64_t argument)
 {
-    if (out == NULL) {
-        return false;
-    }
-
+    if (!space || !space->root || (entry & 3) || (stack & 15) || stack < 16 ||
+        vm_user_check(space, entry, 4, VM_EXEC) ||
+        vm_user_check(space, stack - 16, 16, VM_WRITE)) return -K_EINVAL;
     uint64_t flags = arch_irq_save();
-
-    bool available = log_tail != log_head;
-
-    if (available) {
-        *out = messages[log_tail];
-        log_tail = (log_tail + 1U) % LOG_COUNT;
+    int id = task_create(name, user_bootstrap, NULL);
+    if (id > 0) {
+        struct task *task = find_task((uint32_t)id);
+        task->user = true;
+        task->space = *space;
+        space->root = 0;
+        task->user_entry = entry;
+        task->user_stack = stack;
+        task->user_argument = argument;
     }
-
     arch_irq_restore(flags);
+    return id;
+}
 
-    return available;
+void task_finish(int status, uint64_t syndrome, uint64_t address, uint64_t pc)
+{
+    (void)arch_irq_save();
+    if (current_task) {
+        current_task->exit_status = status;
+        current_task->fault_esr = syndrome;
+        current_task->fault_address = address;
+        current_task->fault_pc = pc;
+    }
+    task_exit();
+    __builtin_unreachable();
+}
+
+void task_reap(void)
+{
+    uint64_t flags = arch_irq_save();
+    for (unsigned int i = 0; i < MAX_TASKS; ++i)
+        if (&task_table[i] != current_task && task_table[i].state == TASK_EXITED)
+            vm_space_destroy(&task_table[i].space);
+    arch_irq_restore(flags);
+}
+
+struct process *task_current_process(void)
+{ return current_task ? current_task->process : NULL; }
+int task_bind_process(uint32_t id, struct process *process)
+{
+    uint64_t flags = arch_irq_save();
+    struct task *task = find_task(id);
+    int rc = -K_EINVAL;
+    if (task && task->user && task->state == TASK_READY && !task->process) {
+        task->process = process; rc = 0;
+    }
+    arch_irq_restore(flags);
+    return rc;
+}
+
+void task_check_cancel(void)
+{
+    uint64_t flags = arch_irq_save();
+    if (current_task && current_task->kill_pending && !current_task->resources)
+        task_finish(-K_ECANCELED, 0, 0, 0);
+    arch_irq_restore(flags);
 }

@@ -3,8 +3,6 @@
 
 #include <dos/type.h>
 
-#define SDHCI_QEMU_BASE  0xFE300000UL
-#define SDHCI_EMMC2_BASE 0xFE340000UL
 
 enum sdhci_response_type {
     SDHCI_RESPONSE_NONE,
@@ -28,9 +26,16 @@ struct sdhci_host {
     uint32_t input_clock_hz;
     uint32_t current_clock_hz;
     uint16_t version;
+    uint32_t last_error;
 };
 
-void sdhci_setup(struct sdhci_host *host, uintptr_t base_address);
+/* Platform-selected accessors; offsets are SDHCI register offsets. */
+uint8_t sdhci_read8(struct sdhci_host *host, uint32_t offset);
+uint16_t sdhci_read16(struct sdhci_host *host, uint32_t offset);
+uint32_t sdhci_read32(struct sdhci_host *host, uint32_t offset);
+void sdhci_write8(struct sdhci_host *host, uint32_t offset, uint8_t value);
+void sdhci_write16(struct sdhci_host *host, uint32_t offset, uint16_t value);
+void sdhci_write32(struct sdhci_host *host, uint32_t offset, uint32_t value);
 int sdhci_init(struct sdhci_host *host);
 int sdhci_set_clock(struct sdhci_host *host, uint32_t frequency_hz);
 int sdhci_send_command(struct sdhci_host *host,

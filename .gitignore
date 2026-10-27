@@ -23,3 +23,6 @@ Research_Image/
 
 
 *.log
+
+AGENTS.md
+__pycache__/

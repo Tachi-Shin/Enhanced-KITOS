@@ -1,83 +1,37 @@
-// arch/arm64/kernel/exception.c
 #include <arch/arm64/kernel/exception.h>
+#include <arch/irq.h>
 #include <arch/arm64/armv8util.h>
-#include <arch/arm64/rpi4/gicv2def.h>
-#include <arch/arm64/rpi4/gicv2.h>
-#include <arch/arm64/kernel/timer.h>
-#include <arch/arm64/rpi4/gicctl.h>
-
-#include <drivers/uart/uart.h>
-
-#include <kernel/task.h>
 #include <kernel/printk.h>
+#include <kernel/task.h>
+#include <kernel/syscall.h>
+#include <kernel/error.h>
+#include <uapi/error.h>
 
-void SetVectorTable(void) {
-    WriteSysReg(VBAR_EL1, (unsigned long)vector_table);
-    __asm__ volatile("isb" ::: "memory");
-    printk("[exception] vector table registered at 0x%lx\n", (uintptr_t)vector_table);
-}
-
-void irq_dispatch(void)
+void arch_exception_init(void)
 {
-    bool need_resched = false;
-
-    uint32_t iar = AckInterrupt();
-    uint32_t irq = GetIRQId(iar);
-
-    if (irq >= 1020U) {
+    WriteSysReg(VBAR_EL1, (uintptr_t)vector_table);
+    __asm__ volatile("isb" ::: "memory");
+}
+void exception_fatal(struct exception_frame *frame)
+{
+    (void)arch_irq_save();
+    printk("[panic] EL1/unsupported exception ESR=%llx FAR=%llx PC=%llx PSTATE=%llx\n",
+           frame->esr, frame->far, frame->pc, frame->pstate);
+    for (;;) __asm__ volatile("wfe" ::: "memory");
+}
+void sync_dispatch(struct exception_frame *frame)
+{
+    if ((frame->pstate & 15) != 0 || !task_current_space()) exception_fatal(frame);
+    unsigned int ec = (unsigned int)(frame->esr >> 26) & 63;
+    if (ec == 0x15) { /* SVC from AArch64 EL0 */
+        if ((frame->esr & 0xFFFF) != 0) { frame->x[0] = (uint64_t)-KITOS_ENOSYS; return; }
+        /* Full user state is on this task's kernel stack. Syscalls may be
+         * preempted or sleep; no GIC acknowledgement is involved here. */
+        arch_irq_restore(0);
+        frame->x[0] = (uint64_t)syscall_dispatch(frame->x[8], frame->x);
+        (void)arch_irq_save();
         return;
     }
-
-    switch (irq) {
-    case IRQ_TIMER:
-        need_resched = arch_timer_handler();
-        break;
-
-    case IRQ_EMMC2:
-        // emmc2_irq_handler();
-        break;
-
-    default:
-        if (!uart_handle_irq(irq)) {
-            DisableInterrupt(irq);
-        }
-        break;
-    }
-
-    __asm__ volatile("dsb sy" ::: "memory");
-    EndOfInterrupt(iar);
-    __asm__ volatile("dsb sy" ::: "memory");
-
-    if (need_resched) {
-        task_yield();
-    }
-}
-
-void sync_dispatch(uint64_t esr, uint64_t far) {
-    /* uint32_t ec = (esr >> ESR_EC_SHIFT) & ESR_EC_MASK;
-
-    switch (ec) {
-    case ESR_EC_DATA_ABORT:
-        // データアクセス例外 → ページフォルトハンドラへ
-        page_fault_handler(far, esr);
-        printk("exception happend!!\n");
-        break;
-
-    case ESR_EC_INST_ABORT:
-        // 命令フェッチ例外 → ページフォルトハンドラへ
-        page_fault_handler(far, esr);
-        printk("exception happend!!\n");
-        break;
-
-    case ESR_EC_SVC64:
-        // システムコール → 将来実装
-        printk("[sync] SVC: not implemented\n");
-        break;
-
-    default:
-        printk("[sync] unhandled exception EC=0x%x ESR=0x%lx FAR=0x%lx\n",
-               ec, esr, far);
-        while (1);
-    }
-    */
+    /* Keep diagnostics in task metadata; do not print from exception context. */
+    task_finish(-K_EFAULT, frame->esr, (ec == 0x20 || ec == 0x24) ? frame->far : 0, frame->pc);
 }

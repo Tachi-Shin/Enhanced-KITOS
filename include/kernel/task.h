@@ -4,58 +4,21 @@
 #include <dos/type.h>
 #include <dos/config.h>
 
-#include <kernel/timer.h>
-
-#include <arch/arm64/kernel/context.h>
-
 #define TASK_NAME_SIZE   16U
-#define TASK_LOG_SIZE    64U
-#define TASK_COLOR_COUNT 8U
-
-struct task {
-    uint32_t id;
-    char task_name[TASK_NAME_SIZE];
-
-    uint32_t state;
-    uint32_t color;
-
-    bool protected;
-    volatile uint64_t work;
-
-    void (*entry)(void *);
-    void *argument;
-
-    /*
-     * スタック領域は[stack_bottom, stack_top)。
-     * stack_topは最後のバイトの直後を指す。
-     */
-    void *stack_bottom;
-    void *stack_top;
-
-    /* このタスクのsleepで使用するタイマー */
-    struct timer_event sleep_timer;
-
-    struct arch_context context;
-};
+struct vm_space;
+struct process;
 
 struct task_info {
     uint32_t id;
     uint32_t state;
-    uint32_t color;
-
-    uint64_t work;
 
     char name[TASK_NAME_SIZE];
 
     void *stack_bottom;
     void *stack_top;
-};
-
-struct task_message {
-    uint32_t id;
-    uint32_t color;
-
-    char text[TASK_LOG_SIZE];
+    bool user;
+    int exit_status;
+    uint64_t fault_esr, fault_address, fault_pc;
 };
 
 enum task_operation {
@@ -69,6 +32,18 @@ int task_create(
     void (*entry)(void *),
     void *argument
 );
+
+/* Takes ownership of space on success (clears the caller's root). */
+int task_create_user(const char *name, struct vm_space *space, uint64_t entry,
+                     uint64_t stack, uint64_t argument);
+int task_init_stacks(void);
+uint32_t task_current_id(void);
+struct vm_space *task_current_space(void);
+void task_finish(int status, uint64_t syndrome, uint64_t address, uint64_t pc) __attribute__((noreturn));
+void task_reap(void);
+void task_check_cancel(void);
+struct process *task_current_process(void);
+int task_bind_process(uint32_t id, struct process *process);
 
 void task_start(void);
 void task_yield(void);
@@ -84,7 +59,7 @@ int task_sleep_ms(uint32_t milliseconds);
 /* 指定した別タスクを休止させる。millisecondsは1以上。 */
 int task_sleep(uint32_t id, uint32_t milliseconds);
 
-void task_exit(void);
+void task_exit(void) __attribute__((noreturn));
 
 int task_protect(uint32_t id);
 
@@ -93,23 +68,12 @@ int task_control(
     enum task_operation operation
 );
 
-int task_set_color(
-    uint32_t id,
-    uint32_t color
-);
-
 unsigned int task_snapshot(
     struct task_info *out,
     unsigned int capacity
 );
 
-/* デモ用の処理回数カウンタ */
-void task_work(void);
-
-/* タスクから表示メッセージを登録する */
-bool task_log(const char *text);
-
-/* シェルから表示メッセージを取得する */
-bool task_read_log(struct task_message *out);
-
+/* Resource pins prevent asynchronous stop/kill while holding kernel objects. */
+void task_resource_get(void);
+void task_resource_put(void);
 #endif

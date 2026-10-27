@@ -14,7 +14,6 @@ struct uart_device;
 struct uart_ops {
     int  (*init)(struct uart_device *dev);
     void (*putc)(struct uart_device *dev, char c);
-    char (*getc)(struct uart_device *dev);
 
     void (*enable_rx_irq)(struct uart_device *dev);
     void (*handle_irq)(struct uart_device *dev);
@@ -43,12 +42,13 @@ struct uart_device {
     struct uart_rx_stats rx_stats;
 };
 
-void uart_register_devices(void);
+int uart_register(struct uart_device *device);
+struct char_device;
+struct char_device *uart_char_device(struct uart_device *device);
 struct uart_device *uart_get_device(unsigned int index);
 
 int uart_init(struct uart_device *dev);
 void uart_putc(struct uart_device *dev, char c);
-char uart_getc(struct uart_device *dev);
 
 int uart_enable_rx_irq(struct uart_device *dev);
 bool uart_handle_irq(unsigned int irq);

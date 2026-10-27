@@ -1,137 +1,85 @@
-// kernel/time/timer.c
-#include <dos/type.h>
-#include <dos/config.h>
-
 #include <kernel/timer.h>
-#include <arch/arm64/kernel/irq.h>
-
-static volatile uint64_t timer_ticks;
+#include <kernel/clock.h>
+#include <kernel/error.h>
+#include <arch/irq.h>
 static struct timer_event *events;
-
-/*
- * uint64_tの周回を考慮した順序比較。
- * 比較する期限の距離が2^63未満であることを前提とする。
- */
-static bool before(uint64_t a, uint64_t b)
-{
-    return (a - b) > (1ULL << 63);
-}
-
-/* IRQ禁止状態で呼ぶ。 */
+static bool before(uint64_t a, uint64_t b) { return (int64_t)(a - b) < 0; }
 static bool cancel_locked(struct timer_event *event)
 {
+    if (!event || !event->armed) return false;
     struct timer_event **link = &events;
-
-    if (event == NULL || !event->armed) {
-        return false;
-    }
-
-    while (*link != NULL && *link != event) {
-        link = &(*link)->next;
-    }
-
-    if (*link == NULL) {
-        return false;
-    }
-
+    while (*link && *link != event) link = &(*link)->next;
+    if (!*link) return false;
     *link = event->next;
-
     event->next = NULL;
     event->armed = false;
-
     return true;
 }
-
 bool kernel_timer_cancel(struct timer_event *event)
 {
     uint64_t flags = arch_irq_save();
-
-    bool cancelled = cancel_locked(event);
-
+    bool result = cancel_locked(event);
+    kernel_time_reprogram();
     arch_irq_restore(flags);
-    return cancelled;
+    return result;
 }
-
-int kernel_timer_arm(
-    struct timer_event *event,
-    uint32_t milliseconds,
-    void (*callback)(void *),
-    void *argument
-)
+bool kernel_timer_pending(const struct timer_event *event)
 {
-    if (event == NULL || callback == NULL || milliseconds == 0U) {
-        return -1;
-    }
-
     uint64_t flags = arch_irq_save();
-
-    /* 再登録なら、以前の期限を解除する。 */
-    (void)cancel_locked(event);
-
-    uint64_t wait_ticks =
-        ((uint64_t)milliseconds + TIMER_INTERVAL_MS - 1U)
-        / TIMER_INTERVAL_MS;
-
-    /*
-     * 登録直後に割込みが来ても早く復帰しないよう、
-     * 切り上げた待機時間に1tick追加する。
-     */
-    event->deadline_ticks = timer_ticks + wait_ticks + 1ULL;
+    bool armed = event && event->armed;
+    arch_irq_restore(flags);
+    return armed;
+}
+int kernel_timer_arm_at(struct timer_event *event, uint64_t deadline,
+                        void (*callback)(void *), void *argument)
+{
+    if (!event || !callback) return -K_EINVAL;
+    uint64_t flags = arch_irq_save();
+    /* Future deadlines must be within half the counter range. */
+    if ((int64_t)(deadline - clock_now()) <= 0) {
+        arch_irq_restore(flags);
+        return -K_EINVAL;
+    }
+    cancel_locked(event);
+    event->deadline = deadline;
     event->callback = callback;
     event->argument = argument;
-
-    /* 期限順に挿入する。同一期限は登録順。 */
     struct timer_event **link = &events;
-
-    while (*link != NULL &&
-           !before(event->deadline_ticks, (*link)->deadline_ticks)) {
-        link = &(*link)->next;
-    }
-
+    while (*link && !before(deadline, (*link)->deadline)) link = &(*link)->next;
     event->next = *link;
     *link = event;
     event->armed = true;
-
+    kernel_time_reprogram();
     arch_irq_restore(flags);
     return 0;
 }
-
-bool kernel_timer_tick(void)
+int kernel_timer_arm(struct timer_event *event, uint32_t ms,
+                     void (*callback)(void *), void *argument)
+{
+    if (!ms) return -K_EINVAL;
+    uint64_t flags = arch_irq_save();
+    int rc = kernel_timer_arm_at(event, clock_after_ms(ms), callback, argument);
+    arch_irq_restore(flags);
+    return rc;
+}
+void kernel_timer_expire(uint64_t now)
 {
     uint64_t flags = arch_irq_save();
-
-    timer_ticks++;
-    uint64_t now = timer_ticks;
-
-    while (events != NULL &&
-           !before(now, events->deadline_ticks)) {
+    /* A bounded interrupt even when callbacks continually rearm events. */
+    for (unsigned int budget = 0; events && budget < 32U; ++budget) {
+        if (before(now, events->deadline)) break;
         struct timer_event *event = events;
-
         void (*callback)(void *) = event->callback;
         void *argument = event->argument;
-
-        /*
-         * コールバックより先にリストから外す。
-         * コールバック内での再登録にも対応する。
-         */
-        events = event->next;
-        event->next = NULL;
-        event->armed = false;
-
+        cancel_locked(event);
         callback(argument);
     }
-
     arch_irq_restore(flags);
-
-    /*
-     * 切替を要求する。
-     * 実際の切替は、既存のirq_dispatch()が
-     * GICへの割込み完了通知を済ませた後に行う。
-     */
-    return true;
 }
-
-uint64_t kernel_timer_get_ticks(void)
+uint64_t kernel_timer_next(uint64_t fallback)
 {
-    return timer_ticks;
+    uint64_t flags = arch_irq_save();
+    uint64_t next = events && before(events->deadline, fallback) ? events->deadline : fallback;
+    arch_irq_restore(flags);
+    return next;
 }
