@@ -161,10 +161,8 @@ static void mini_uart_enable_rx_irq(struct uart_device *dev)
 
 static void mini_uart_handle_irq(struct uart_device *dev)
 {
-    if ((mmio_read32(AUX_MU_IIR_REG) & AUX_MU_IIR_NO_IRQ) != 0U) {
-        return;
-    }
-
+    /* Also called for FIFO polling when the interrupt path is unavailable.
+     * LSR reports received data independently of the interrupt mask/IIR. */
     for (unsigned int i = 0U; i < MINI_UART_RX_BUDGET; i++) {
         uint32_t status = mmio_read32(AUX_MU_LSR_REG);
 

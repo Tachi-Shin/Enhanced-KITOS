@@ -7,6 +7,8 @@ import tempfile
 
 
 def stage(disk, executable):
+    from rootfs import stage as stage_system
+    stage_system(disk, drivers=False)
     data = Path(executable).read_bytes()
     subprocess.run(['mcopy', '-i', str(disk), str(executable), '::PROBE.ELF'], check=True)
     bad = {}
@@ -37,6 +39,7 @@ def free_pages(machine):
 
 def run(machine, small=False):
     baseline = free_pages(machine)
+    baseline_processes = machine.command('procs').count('pid=')
     for name in ('BADMAG', 'BADARCH', 'BADWX', 'BADRNG', 'DYNAMIC', 'TRUNC'):
         machine.command(f'run /{name}.ELF', 'error -8', allow_error=True)
         assert free_pages(machine) == baseline, name + ': load failure leaked pages'
@@ -55,5 +58,10 @@ def run(machine, small=False):
     for pid in ids:
         machine.command(f'wait {pid}', 'status=0')
     assert free_pages(machine) == baseline, 'concurrent FP processes leaked pages'
-    assert 'pid=' not in machine.command('procs')
+    # Repeated ELF loads and saturation can approach 15s on the small-memory
+    # fixture. Keep a finite deadline with headroom for a busy host.
+    text = machine.command('run /PROBE.ELF limits', '[limits] process boundaries PASS', timeout=45)
+    assert 'status=0' in text
+    assert free_pages(machine) == baseline, 'process boundary tests leaked pages'
+    assert machine.command('procs').count('pid=') == baseline_processes
     machine.command('cat /USER.TXT', 'Newlib file IO 42')

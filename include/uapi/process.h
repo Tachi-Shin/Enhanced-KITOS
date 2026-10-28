@@ -11,7 +11,7 @@
 #define KITOS_KIND_DIRECTORY 2
 #define KITOS_KIND_CHAR 3
 #ifndef __ASSEMBLER__
-struct kitos_stat { unsigned long long inode, size; unsigned int kind, reserved; };
+struct kitos_stat { unsigned long long inode, size; unsigned int kind, device; };
 _Static_assert(sizeof(struct kitos_stat) == 24, "stat wire layout");
 #endif
 #endif

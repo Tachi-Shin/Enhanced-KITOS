@@ -1,0 +1,68 @@
+Enhanced KITOS IPC / double buffer validation — 2026-10-28
+
+Host: macOS arm64 / aarch64-elf-gcc 15.2 / QEMU 10.2.2. Native C tests use ASan/UBSan.
+Hardware and QEMU build PASS. All 12 driver modules rebuilt with ABI 6; 47 ELF commands/probes.
+No physical Pi 4 execution was performed. VSync synchronization is not implemented.
+
+build/tests/ipc-host-suite.txt
+block LBA read/write test: PASS
+FAT32 direct/MBR, 8.3/LFN, read/write test: PASS
+VFS/FAT32 extended: PASS (7331 checks)
+timer deadlines/cancel/rearm/budget/wrap: PASS (83 checks)
+BCM2711 SDHCI 32-bit MMIO/PIO/errors/timeouts/clocks: PASS (1873 checks)
+SD v1/v2/capacity/addressing/retry/timeout: PASS (1031 checks)
+VFS/FAT32 extended: PASS (7331 checks)
+VFS/FAT32 extended: PASS (7331 checks)
+VFS/FAT32 extended: PASS (7331 checks)
+page allocator: 2636 checks PASS
+boot memory: 25317 checks PASS
+ELF64 validation/load: 21347 checks PASS (3447 bounded reads)
+USB descriptors/boot-HID: 363 checks PASS
+BCM2711 PCIe sequence/error bounds: 1414 checks PASS
+Driver ELF validation/load/failure injection: 539675 checks PASS
+FAT12/16/32/exFAT VFS read/write/Unicode/zero-fill/remount/hot-unplug: 66782 checks PASS
+USB BOT/SCSI capacity16/read16/write16/CSW recovery/medium change/write protect/module pin: 84 checks PASS
+SuperSpeed descriptors/BOS/companion/PSI/shared enumeration/hub control: 664 checks PASS
+Line editor/history/UTF-8/bounds/fuzz: 500227 checks PASS
+EDID/preferred timing/firmware readback/HDMI1/fallback/color/font/ANSI/scroll/bounds/fuzz PASS
+Video: 496 checks PASS
+UART FIFO fallback/IRQ interleaving/error recovery: 41 checks PASS
+IPC object boundaries/ownership/EOF/messages/names/events/shared/OOM/reuse: 136805 checks PASS
+
+build/tests/ipc-kernel-suite.txt
+QEMU boot/UART/IRQ/tasks/SD/VFS/persistence/no-media/MMU/EL0/DTB/OOM/ELF/Newlib/process/FP: PASS
+
+build/tests/ipc-unix-suite.txt
+Boot .EKM/ownership/IRQ pin + Unix root + colored EL0 sh/PATH/cwd/environment/ELF utilities PASS
+No-media / missing-shell recovery with module-provided UART/timer PASS
+
+build/tests/ipc-qemu.txt
+IPC EL0 + quote-aware concurrent shell pipes + EOF + status + rollback + repeated reclaim PASS
+
+build/tests/ipc-existing-image.txt
+IPC EL0 + quote-aware concurrent shell pipes + EOF + status + rollback + repeated reclaim PASS
+
+build/tests/ipc-display-existing-image.txt
+GPU page flip + exact red/staged-red/blue scanout + exclusive ownership + release/crash/reclaim PASS
+
+build/tests/ipc-terminal-existing-image.txt
+Testing a copy of existing image: build/tests/system.img
+Persistent history / editing / command+path Tab / USB Up / UART+HDMI / exact 6x8 RGB pixels PASS
+
+build/tests/ipc-boot-snapshot.txt
+DTB overlapping kernel NOLOAD BSS: early snapshot + VM + 16MiB OOM PASS
+
+build/tests/ipc-uart-suite.txt
+Hardware PL011.EKM/GIC path: IRQ input, masked-IRQ FIFO input, single-byte echo, recovery shell PASS
+
+Existing system image was updated with full backup:
+build/tests/system.img.before-update-hyh5awo_.bak
+Existing files, /etc settings and user history retained. Tests used disposable copies.
+Earlier backup system.img.before-update-yq90g7pw.bak was also retained.
+
+Deployment archive: build/deploy/ekitos-ipc-display-update.zip
+SHA256: df10148f857c534db08fe164db68ee6e9ffb73245dff4af21b1e3da452c089af
+ZIP CRC + every SHA256SUMS entry + hardware kernel + current sh + 12 module count verified.
+
+Not included: GUI desktop/window manager/input focus, shell redirection/job control/fork, general signals, POSIX/SysV IPC compatibility.
+Contracts and API limits: docs/ipc-display.md

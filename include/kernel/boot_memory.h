@@ -4,6 +4,7 @@
 
 #define BOOT_RESERVED_MAX 64U
 struct boot_memory {
+    struct memory_range ram; /* Firmware-described low RAM bank, when present. */
     struct memory_range reserved[BOOT_RESERVED_MAX];
     unsigned int count;
     uint32_t dtb_size;

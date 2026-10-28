@@ -1,4 +1,5 @@
 #include "internal.h"
+#include <kernel/console.h>
 #include <kernel/elf.h>
 #include <kernel/task.h>
 #include <kernel/error.h>
@@ -67,8 +68,8 @@ static int initial_stack(struct vm_space *space, const struct elf_plan *plan,
     if (!rc) *stack = sp;
     return rc;
 }
-int process_spawn(const char *path, unsigned int argc, const char *const argv[],
-                   unsigned int envc, const char *const envp[])
+static int spawn(const char *path,unsigned int argc,const char *const argv[],
+    unsigned int envc,const char *const envp[],const struct kitos_fd_map *maps,unsigned int map_count,bool mapped)
 {
     if (!path || *path != '/') return -K_EINVAL;
     process_pin();
@@ -79,6 +80,8 @@ int process_spawn(const char *path, unsigned int argc, const char *const argv[],
     }
     arch_irq_restore(flags);
     if (!p) { process_unpin(); return -K_EAGAIN; }
+    struct process *parent = task_current_process();
+    strcpy(p->cwd, parent ? parent->cwd : "/");
     struct file *file = NULL;
     struct vm_space space = {0};
     struct vfs_stat stat;
@@ -98,7 +101,27 @@ int process_spawn(const char *path, unsigned int argc, const char *const argv[],
     p->heap_base = plan.end + PAGE_SIZE;
     p->heap_break = p->heap_base;
     p->heap_limit = p->heap_base + PROCESS_HEAP_MAX;
-    p->fd[0].kind = FD_INPUT; p->fd[1].kind = p->fd[2].kind = FD_OUTPUT;
+    if(!mapped){p->fd[0].kind=FD_INPUT;p->fd[1].kind=p->fd[2].kind=FD_OUTPUT;}
+    else{
+        int sources[PROCESS_FD_MAX];bool seen[PROCESS_FD_MAX]={0};
+        if(map_count>PROCESS_FD_MAX||(map_count&&!maps)){rc=-K_EINVAL;goto done;}
+        for(unsigned int i=0;i<PROCESS_FD_MAX;++i)sources[i]=i<3?(int)i:-1;
+        for(unsigned int i=0;i<map_count;++i){
+            int src=maps[i].source,dst=maps[i].target;
+            if(dst<0||dst>=(int)PROCESS_FD_MAX||src< -1||src>=(int)PROCESS_FD_MAX||seen[dst]){rc=-K_EINVAL;goto done;}
+            seen[dst]=true;sources[dst]=src;
+        }
+        for(unsigned int i=0;i<PROCESS_FD_MAX;++i){
+            int src=sources[i];if(src<0)continue;
+            if(!parent){if(src<3)p->fd[i].kind=src?FD_OUTPUT:FD_INPUT;else{rc=-K_EBADF;goto done;}}
+            else{
+                if(!parent->fd[src].kind){if(i<3&&!seen[i])continue;rc=-K_EBADF;goto done;}
+                if(!seen[i]&&(parent->fd[src].flags&KITOS_IPC_CLOEXEC))continue;
+                RETRY_BUSY(process_fd_copy(&p->fd[i],&parent->fd[src]));if(rc)goto done;
+                p->fd[i].flags&=~KITOS_IPC_CLOEXEC;
+            }
+        }
+    }
     /* Release loader handle before publishing the child. */
     RETRY_BUSY(vfs_close(file)); file = NULL;
     if (rc) goto done;
@@ -114,14 +137,23 @@ int process_spawn(const char *path, unsigned int argc, const char *const argv[],
 done:
     if (file) { int saved = rc; RETRY_BUSY(vfs_close(file)); rc = saved; }
     vm_space_destroy(&space);
-    if (rc < 0) p->state = PROC_FREE;
+    if(rc<0){
+        for(unsigned int i=0;i<PROCESS_FD_MAX;++i)if(p->fd[i].kind){int closed;do{closed=process_fd_close(p,i);if(closed==-K_EBUSY)task_sleep_ms(1);}while(closed==-K_EBUSY);}
+        p->state=PROC_FREE;
+    }
     process_unpin();
     return rc;
 }
 
+int process_spawn(const char *path,unsigned int argc,const char *const argv[],unsigned int envc,const char *const envp[])
+{return spawn(path,argc,argv,envc,envp,NULL,0,false);}
+int process_spawn_mapped(const char *path,unsigned int argc,const char *const argv[],unsigned int envc,const char *const envp[],const struct kitos_fd_map *maps,unsigned int count)
+{return spawn(path,argc,argv,envc,envp,maps,count,true);}
+
 void process_task_exited(struct process *p, int status, uint64_t syndrome)
 {
     /* IRQ-masked notification only. VFS cleanup runs in the protected reaper. */
+    console_graphics_exit(p->pid);
     p->status = syndrome ? 11 : status == -K_ECANCELED ? 9 : (status & 255) << 8;
     p->state = PROC_DEAD;
     for (unsigned int i = 0; i < MAX_TASKS; ++i)
@@ -131,16 +163,21 @@ static void collect(void)
 {
     for (unsigned int i = 0; i < MAX_TASKS; ++i) {
         struct process *p = &processes[i];
+        bool cleaned = false;
         if (p->state == PROC_DEAD) {
             bool pending = false;
-            for (unsigned int f = 0; f < PROCESS_FD_MAX; ++f) if (p->fd[f].kind == FD_FILE) {
-                int rc = vfs_close(p->fd[f].file);
-                if (rc == -K_EBUSY) pending = true;
-                else p->fd[f] = (struct process_fd){0};
+            for(unsigned int f=0;f<PROCESS_FD_MAX;++f)if(p->fd[f].kind){
+                if(process_fd_close(p,f)==-K_EBUSY)pending=true;
             }
-            if (!pending) p->state = PROC_ZOMBIE;
+            if(!pending)process_ipc_cleanup(p);
+            cleaned = !pending;
         }
+        /* Publish completion and release orphans atomically against wait/spawn.
+         * A parent may otherwise reap and reuse a zombie between these checks. */
+        uint64_t flags = arch_irq_save();
+        if (cleaned) p->state = PROC_ZOMBIE;
         if (p->state == PROC_ZOMBIE && !p->parent) p->state = PROC_FREE;
+        arch_irq_restore(flags);
     }
 }
 void process_reaper(void *unused)

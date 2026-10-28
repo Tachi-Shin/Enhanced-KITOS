@@ -1,0 +1,74 @@
+Enhanced KITOS: shell history / completion / HDMI framebuffer
+Date: 2026-10-28 JST
+Environment: macOS arm64, aarch64-elf-gcc 15.2, QEMU 10.2.2
+Driver ABI: 5
+
+Builds
+  make TARGET=qemu -j4                                      PASS
+  make TARGET=hardware -j4                                  PASS
+  make drivers-native                                      PASS (all 12 modules)
+  build/rootfs: 12 .EKM files, 45 /bin and /sbin ELF files
+  git diff --check                                         PASS
+
+Host tests: make test -j4                                 PASS
+  block / FAT32 direct+MBR / VFS+Unicode / timer / SD+SDHCI
+  512/1024/2048/4096 sector geometries / physical pages / DTB+ATAG
+  ELF / USB HID descriptors / PCIe / FAT12+16+32+exFAT / BOT+SCSI / SS
+  Driver ELF load/failure injection: 532587 checks
+  New line editor: 500227 checks (ASan + UBSan)
+    64-entry ring, duplicate suppression, draft restoration, insertion/deletion,
+    ANSI/SS3/Home/End, Ctrl editing, UTF-8 boundaries, narrow output buffer,
+    cancellation/EOF/overflow and 3000 random input streams.
+  New video tests: 473 checks (ASan + UBSan)
+    EDID header/checksum/DTD/CTA, firmware pixel-clock limit, preferred mode,
+    1920x1080 at 60000 mHz, HDMI1-only selection, limited RGB flags and EDID bpc,
+    firmware readback/substituted mode, QEMU fallback with unknown refresh,
+    invalid pitch refusal, RGB/BGR 16/24/32-bit pixels, font, ANSI/OSC, scroll,
+    canary-protected framebuffer and malformed/random EDID/terminal streams.
+
+QEMU commands used (QEMU=/Users/shingo/qemu-10.2.2/bin/qemu-system-aarch64;
+kernel=build/rpi4/qemu/kernel8.img):
+  tools/terminal_qemu_test.py                               PASS
+    Actual AArch64 VIDEO.EKM loaded from FAT, UART + framebuffer output.
+    Persistent history across reboot; Up/Down and draft restore; cursor insert.
+    Command/PATH, directory, escaped-space filename and ambiguous Tab candidates.
+    Actual QMP USB keyboard Up and Tab through DWC2 + HID.EKM + input queue.
+    QMP screendump, all 48 pixels of a 6x8 red 'A' compared with exact RGB values;
+    multiple ANSI colors and full ASCII samples displayed. PNG visually inspected.
+    Output: 640x480, 32-bpp RGB, pitch 2560, 106 columns x 60 rows.
+    QEMU exposes no EDID or display timing: refresh/link/range reported unknown.
+  tools/unix_qemu_test.py                                   PASS
+    ELF commands/PATH/cwd/env, resource reclamation, missing-shell/no-media recovery,
+    ABI 5 modules, pinned backend refusal, IRQ ownership/reuse,
+    firmware multi-tag API length/duplicate/request bounds and live mailbox reuse,
+    terminal-info syscall data and invalid/read-only EL0 pointers.
+  tools/qemu_test.py                                        PASS
+    Boot/UART/IRQ/scheduler/SD/VFS/persistence/MMU/EL0/DTB/OOM/ELF/Newlib/FP.
+  tools/module_qemu_test.py                                 PASS
+    ABI rejection, malformed files, duplicate/pool limit (32), rollback, HID reload.
+  tools/usb_qemu_test.py                                    PASS
+    Hub/keyboard/mouse/input/console/hotplug/release/reuse.
+  tools/storage_qemu_test.py                                PASS
+    FAT12/16/32/exFAT, MBR/GPT, 4K sectors, Unicode and remount persistence,
+    write protection, multiple disks, EL0 open-FD unplug/replug and two LUNs.
+  tools/storage_xhci_test.py --super                         PASS
+    Same native C production xHCI+BOT/SCSI+exFAT code against QEMU PCI/DMA model;
+    SuperSpeed bulk/EP0/burst, mixed USB2 HID, unplug/replug, recovery/reclamation.
+
+Evidence in ignored build/tests:
+  terminal-build.txt, terminal-hardware-build.txt, terminal-native.txt
+  terminal-regression-host.txt, terminal-final-host.txt
+  terminal-qemu.txt, terminal-qemu-transcript.txt, terminal-screen.ppm/.png
+  terminal-unix.txt, unix-shell-transcript.txt
+  terminal-kernel-qemu.txt, terminal-modules-qemu.txt, terminal-usb-qemu.txt
+  terminal-storage-qemu.txt, terminal-super-qemu.txt
+
+Limitations
+  No Raspberry Pi 4 or physical HDMI monitor was available for this validation.
+  EDID and SET/GET_DISPLAY_TIMING are checked using firmware mock responses;
+  QEMU validates the actual mailbox/DMA/framebuffer/ELF rendering path, not the
+  physical HDMI link, EDID wire transaction or refresh negotiation.
+  Mode selection happens at boot; HDMI hotplug reconfiguration, multiple active
+  outputs, VSync/double buffering, HDR/deep-color/YUV and Unicode fonts are pending.
+  Current color output target is RGB SDR at 8 bits/channel.
+  Historical unix-system/USB validation records describe earlier ABI milestones.

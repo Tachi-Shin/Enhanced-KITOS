@@ -1,4 +1,4 @@
-#include <kernel/monitor.h>
+#include <kernel/diagnostics.h>
 #include <kernel/vm.h>
 #include <kernel/task.h>
 #include <kernel/clock.h>

@@ -1,0 +1,50 @@
+Enhanced KITOS recovery shell cwd regression
+Date: 2026-10-28 JST
+Environment: macOS arm64, aarch64-elf-gcc 15.2, QEMU 10.2.2
+Driver ABI: 5 (unchanged)
+
+Reported physical Pi 4 symptom
+  FAT32 mounted, /bin empty, kernel recovery shell active.
+  cd bin stored //bin; cd .. stored //bin/.. instead of /.
+  Previous normal-EL0-shell tests did not exercise recovery-shell cd.
+
+Fix
+  Add vfs_resolve_directory using existing prefix validation and mount traversal.
+  Both process chdir and recovery-shell cd call it; duplicate lexical cwd logic
+  has been removed. Output is committed only after a directory is validated.
+  Recovery relative path join avoids introducing // at root.
+  No disk formatting, user file removal or implicit shell replacement is used.
+
+Validation
+  make TARGET=qemu -j4                                    PASS
+  make TARGET=hardware -j4                                PASS
+  make test-vfs                                          PASS (7331 checks, ASan/UBSan)
+    New checks: root-clamped .., repeated slashes, ./.., aliases of input/output,
+    missing/file prefix rejection, non-directory target, invalid/null arguments,
+    failed operations leave output unchanged, .. across a mount boundary.
+  tools/recovery_qemu_test.py --kernel build/rpi4/qemu/kernel8.img
+    Direct FAT32, no user ELF/modules, empty /bin created at boot:
+      cd bin -> /bin, cd .. -> /, above-root .. -> /             PASS
+      ./.., repeated slashes, nested/quoted paths, pwd           PASS
+      invalid/non-directory targets preserve cwd                PASS
+      relative create/rename/read from the resolved directory    PASS
+    MBR with two FAT32 partitions:
+      BOOT contains all ELF commands, DATA has none               PASS
+      DATA chosen as /; same empty-/bin recovery behavior         PASS
+      Install user programs on DATA, reboot -> normal /bin/sh     PASS
+      Same cd semantics and pre-existing DATA files preserved     PASS
+  tools/unix_qemu_test.py --kernel build/rpi4/qemu/kernel8.img   PASS
+    Normal sh PATH/cwd/env, uaccess, process reclaim, pinned modules,
+    missing/invalid ELF recovery and no-media fallback.
+  git diff --check                                         PASS
+
+Evidence in ignored build/tests
+  recovery-cwd-host.txt
+  recovery-cwd-qemu-build.txt, recovery-cwd-hardware-build.txt
+  recovery-cwd-qemu.txt, recovery-cwd-qemu-transcript.txt
+  recovery-cwd-unix-qemu.txt
+
+Distribution: build/deploy/ekitos-recovery-cwd-fix.zip
+  boot/kernel8.img -> firmware BOOT partition
+  rootfs/bin, rootfs/sbin, rootfs/lib -> mounted EKITOS root (DATA if partition 2 FAT32)
+  Physical Pi 4 confirmation of this fix is pending.

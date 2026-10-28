@@ -23,13 +23,17 @@ int process_user_path(uint64_t address, char *out, size_t capacity)
     if (rc || out[0] == '/') return rc;
     size_t n = strlen(out);
     if (!n) return -K_ENOENT;
-    if (n + 2 > capacity) return -K_ENAMETOOLONG;
-    for (size_t i = n + 1; i; --i) out[i] = out[i - 1];
-    out[0] = '/';
+    struct process *p = task_current_process();
+    const char *cwd = p ? p->cwd : "/";
+    size_t prefix = strlen(cwd);
+    if (prefix + n + 2 > capacity) return -K_ENAMETOOLONG;
+    for (size_t i = n + 1; i; --i) out[prefix + i] = out[i - 1];
+    memcpy(out, cwd, prefix); out[prefix] = '/';
     return 0;
 }
 static int64_t transfer(struct process_fd *fd, uint64_t address, uint64_t length, bool write)
 {
+    if(fd->kind==FD_IPC)return process_ipc_io(fd,address,length,write);
     if (length > 1024U * 1024U) return -K_EINVAL;
     if ((write && fd->kind == FD_INPUT) || (!write && fd->kind == FD_OUTPUT)) return -K_EBADF;
     if (fd->kind == FD_FILE && !(fd->flags & (write ? VFS_WRITE : VFS_READ))) return -K_EBADF;
@@ -63,7 +67,7 @@ static int64_t transfer(struct process_fd *fd, uint64_t address, uint64_t length
     return (int64_t)total;
 }
 static void wire_stat(struct kitos_stat *out, const struct vfs_stat *in)
-{ *out = (struct kitos_stat){in->number, in->size, in->kind, 0}; }
+{ *out = (struct kitos_stat){in->number, in->size, in->kind, in->device}; }
 int64_t process_fd_call(struct process *p, uint64_t number, const uint64_t a[6])
 {
     int rc = 0;
@@ -72,7 +76,9 @@ int64_t process_fd_call(struct process *p, uint64_t number, const uint64_t a[6])
         rc = process_user_path(a[0], path, sizeof(path));
         if (rc) return rc;
         if (path[0] != '/') return -K_EINVAL;
-        if (number == KITOS_SYS_UNLINK) { RETRY_BUSY(vfs_unlink(path)); return rc; }
+        /* Namespace EBUSY can persist while this process holds an open file.
+         * Retrying under a resource pin would prevent both close and kill. */
+        if (number == KITOS_SYS_UNLINK) return vfs_unlink(path);
         if (number == KITOS_SYS_STAT) {
             if (vm_user_check(task_current_space(), a[1], sizeof(struct kitos_stat), VM_WRITE)) return -K_EFAULT;
             struct vfs_stat stat; RETRY_BUSY(vfs_stat(path, &stat));
@@ -87,7 +93,7 @@ int64_t process_fd_call(struct process *p, uint64_t number, const uint64_t a[6])
         struct file *file;
         RETRY_BUSY(vfs_open(path, (unsigned int)a[1], &file));
         if (rc) return rc;
-        p->fd[index] = (struct process_fd){FD_FILE, (unsigned int)a[1], file};
+        p->fd[index] = (struct process_fd){.kind=FD_FILE,.flags=(unsigned int)a[1],.file=file};
         return index;
     }
     if (a[0] >= PROCESS_FD_MAX || !p->fd[a[0]].kind) return -K_EBADF;
@@ -95,9 +101,7 @@ int64_t process_fd_call(struct process *p, uint64_t number, const uint64_t a[6])
     switch (number) {
     case KITOS_SYS_READ: return transfer(fd, a[1], a[2], false);
     case KITOS_SYS_WRITE: return transfer(fd, a[1], a[2], true);
-    case KITOS_SYS_CLOSE:
-        if (fd->kind == FD_FILE) { RETRY_BUSY(vfs_close(fd->file)); if (rc) return rc; }
-        *fd = (struct process_fd){0}; return 0;
+    case KITOS_SYS_CLOSE:return process_fd_close(p,(unsigned int)a[0]);
     case KITOS_SYS_LSEEK: {
         if (fd->kind != FD_FILE) return -K_ESPIPE;
         if (a[2] > 2) return -K_EINVAL;
@@ -105,7 +109,7 @@ int64_t process_fd_call(struct process *p, uint64_t number, const uint64_t a[6])
         RETRY_BUSY(vfs_seek(fd->file, (int64_t)a[1], (unsigned int)a[2], &position));
         return rc ? rc : (int64_t)position;
     }
-    case KITOS_SYS_ISATTY: return fd->kind == FD_FILE ? -K_ENOTTY : 1;
+    case KITOS_SYS_ISATTY: return fd->kind == FD_INPUT||fd->kind==FD_OUTPUT ? 1 : -K_ENOTTY;
     case KITOS_SYS_FSTAT: {
         if (vm_user_check(task_current_space(), a[1], sizeof(struct kitos_stat), VM_WRITE)) return -K_EFAULT;
         struct kitos_stat wire = {0, 0, KITOS_KIND_CHAR, 0};
@@ -113,6 +117,8 @@ int64_t process_fd_call(struct process *p, uint64_t number, const uint64_t a[6])
             struct vfs_stat stat; RETRY_BUSY(vfs_fstat(fd->file, &stat));
             if (rc) return rc;
             wire_stat(&wire, &stat);
+        }else if(fd->kind==FD_IPC){
+            extern uint64_t ipc_size(uint32_t);wire.size=ipc_size(fd->handle);if(wire.size)wire.kind=KITOS_KIND_REGULAR;
         }
         return copy_to_user(task_current_space(), a[1], &wire, sizeof(wire));
     }

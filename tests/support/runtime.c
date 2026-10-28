@@ -2,3 +2,4 @@
 uint64_t test_irq_mask;
 void task_resource_get(void) {}
 void task_resource_put(void) {}
+__attribute__((weak)) void ipc_notify(void) {}

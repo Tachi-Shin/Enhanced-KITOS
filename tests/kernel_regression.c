@@ -1,4 +1,4 @@
-#include <kernel/monitor.h>
+#include <kernel/diagnostics.h>
 #include <kernel/task.h>
 #include <kernel/clock.h>
 #include <kernel/timer.h>
@@ -67,6 +67,10 @@ int kernel_regression(void)
     }
     uint64_t start = clock_ms(), irqs = kernel_timer_irq_count();
     if (task_sleep_ms(60U) != 0) return -1;
+    /* Wall time continues while QEMU is descheduled by the host. Require the
+     * requested sleep, then allow bounded completion of both CPU workers. */
+    while((!finished[0]||!finished[1])&&clock_ms()-start<1000U)
+        if(task_sleep_ms(10U))return -1;
     uint64_t elapsed = clock_ms() - start;
     bool ok = elapsed >= 60U && elapsed < 1000U && finished[0] && finished[1] &&
               progress[0] && progress[1] && kernel_timer_irq_count() > irqs;

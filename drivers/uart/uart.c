@@ -3,6 +3,7 @@
 #include <arch/irq.h>
 
 #include <drivers/uart/uart.h>
+#include <kernel/ipc.h>
 
 
 
@@ -100,6 +101,7 @@ void uart_rx_push(struct uart_device *dev, char c)
 
     dev->rx[dev->rx_head] = c;
     dev->rx_head = next;
+    ipc_notify();
 }
 
 /* IRQ禁止状態で呼ぶ */
@@ -119,6 +121,13 @@ int uart_try_getc(struct uart_device *dev, char *out)
     }
 
     flags = arch_irq_save();
+
+    /* An RX interrupt may be masked/not routed by the boot firmware or may
+     * not yet have reached its FIFO threshold. Drain a bounded amount through
+     * the same backend when the software queue is empty. IRQ masking prevents
+     * the IRQ handler from consuming the same FIFO byte concurrently. */
+    if (!dev->rx_lost && dev->rx_tail == dev->rx_head &&
+        dev->ops && dev->ops->handle_irq) dev->ops->handle_irq(dev);
 
     if (dev->rx_lost) {
         /*

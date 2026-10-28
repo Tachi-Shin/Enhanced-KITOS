@@ -55,7 +55,7 @@ struct mount {
     unsigned int open_files;
     bool used;
 };
-struct vfs_stat { uint64_t number, size; unsigned int kind; uint8_t attributes; };
+struct vfs_stat { uint64_t number, size; unsigned int kind; uint8_t attributes; unsigned int device; };
 /* Fixed object pools, no heap. Single nonblocking serialization gate: a
  * concurrent or callback-reentrant call returns -K_EBUSY, never spins in IRQ.
  * Task context only. Callbacks may not call VFS. Do not kill a task in a VFS call.
@@ -63,10 +63,19 @@ struct vfs_stat { uint64_t number, size; unsigned int kind; uint8_t attributes; 
  * These kernel APIs deliberately are not file descriptor / syscall APIs. */
 int vfs_register(const struct filesystem_type *type);
 int vfs_mount(const char *type, const char *path, struct block_device *, const void *options);
+/* A leaf mountpoint may exist only in the mount table; its parent must exist. */
+int vfs_mount_virtual(const char *type, const char *path, struct block_device *);
 int vfs_unmount(const char *path);
+int vfs_unmount_device(struct block_device *);
+int vfs_mount_path(struct block_device *, char *out);
 int vfs_stat(const char *path, struct vfs_stat *out);
+/* Resolve an existing directory using the same component/mount checks as
+ * stat/open. out holds VFS_PATH_MAX bytes, may alias path, and is unchanged
+ * on failure. Both the EL0 and recovery shells use this for their cwd. */
+int vfs_resolve_directory(const char *path, char *out);
 int vfs_open(const char *path, unsigned int flags, struct file **out);
 int vfs_close(struct file *file);
+int vfs_retain(struct file *file);
 int vfs_fstat(struct file *, struct vfs_stat *out);
 int vfs_read(struct file *, void *, uint32_t, uint32_t *done);
 int vfs_write(struct file *, const void *, uint32_t, uint32_t *done);

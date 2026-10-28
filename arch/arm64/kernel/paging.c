@@ -3,6 +3,7 @@
 #include <kernel/vm.h>
 #include <kernel/error.h>
 #include <lib/string.h>
+#include <kernel/module.h>
 
 #define PTE_VALID 1ULL
 #define PTE_TABLE 3ULL
@@ -15,6 +16,7 @@
 #define PTE_PXN (1ULL << 53)
 #define PTE_UXN (1ULL << 54)
 #define PTE_DEVICE (1ULL << 2)
+#define PTE_BORROWED (1ULL << 55)
 
 static uint64_t kernel_root, empty_root, active_user;
 static bool final_tables;
@@ -122,7 +124,7 @@ static void destroy_table(uint64_t physical, unsigned int level)
         if (!(entries[i] & PTE_VALID)) continue;
         uint64_t page = entries[i] & PTE_ADDRESS;
         if (level < 3) destroy_table(page, level + 1);
-        else (void)page_free(page);
+        else if(!(entries[i]&PTE_BORROWED))(void)page_free(page);
     }
     (void)page_free(physical);
 }
@@ -154,6 +156,13 @@ int vm_map_new(struct vm_space *space, uint64_t address, unsigned int permission
     arch_tlb_flush();
     return rc;
 }
+int vm_map_shared(struct vm_space *space,uint64_t address,uint64_t physical,bool writable)
+{
+    if(!space||!space->root||!vm_user_range(address,PAGE_SIZE)||(address&(PAGE_SIZE-1))||!page_is_allocated(physical))return -K_EINVAL;
+    uint64_t attrs=PTE_USER|PTE_NG|PTE_SH_INNER|PTE_PXN|PTE_UXN|PTE_BORROWED;
+    if(!writable)attrs|=PTE_RO;
+    int rc=map(space->root,address,physical,attrs);arch_tlb_flush();return rc;
+}
 int vm_query(const struct vm_space *space, uint64_t address, struct vm_mapping *out)
 {
     if (!space || !space->root || !out || !vm_user_range(address, 1)) return -K_EFAULT;
@@ -173,9 +182,10 @@ int vm_unmap(struct vm_space *space, uint64_t address)
     uint64_t *entry = walk(space->root, address, false, &rc);
     if (!entry || !(*entry & PTE_VALID)) return -K_ENOENT;
     uint64_t page = *entry & PTE_ADDRESS;
+    bool borrowed=(*entry&PTE_BORROWED)!=0;
     *entry = 0;
     arch_tlb_flush();
-    (void)page_free(page);
+    if(!borrowed)(void)page_free(page);
     prune(space->root, address);
     return 0;
 }
@@ -219,6 +229,10 @@ int arch_kernel_memory_init(struct memory_range ram,
             if (rc) return rc;
         }
     }
+    uint64_t mair;
+    __asm__ volatile("mrs %0, mair_el1" : "=r"(mair));
+    mair=(mair&~(255ULL<<16))|(0x44ULL<<16); /* Attr2: Normal, non-cacheable. */
+    __asm__ volatile("msr mair_el1, %0; isb" :: "r"(mair) : "memory");
     /* Already executing with high PC, high SP and high VBAR. Replace the shared
      * bootstrap tables, invalidate both regimes, then enable caches and WXN. */
     __asm__ volatile("dsb sy; msr ttbr1_el1, %0; msr ttbr0_el1, %1; isb"
@@ -242,6 +256,58 @@ int arch_kernel_guard(void *page)
     *entry = 0;
     arch_tlb_flush();
     return 0; /* Static stack reservation remains owned by the kernel. */
+}
+static bool module_address(uint64_t address)
+{
+    return address >= MODULE_VIRTUAL_BASE && address < MODULE_VIRTUAL_BASE + MODULE_COUNT_MAX * MODULE_VIRTUAL_STRIDE &&
+        !(address & (PAGE_SIZE - 1));
+}
+int arch_module_map(uint64_t address, uint64_t physical, unsigned int permissions)
+{
+    if (!final_tables || !module_address(address) || !page_is_allocated(physical) ||
+        !(permissions & VM_READ) || (permissions & ~(VM_READ | VM_WRITE | VM_EXEC)) ||
+        ((permissions & (VM_WRITE | VM_EXEC)) == (VM_WRITE | VM_EXEC))) return -K_EINVAL;
+    uint64_t attrs = PTE_SH_INNER | PTE_UXN;
+    if (!(permissions & VM_WRITE)) attrs |= PTE_RO;
+    if (!(permissions & VM_EXEC)) attrs |= PTE_PXN;
+    int rc = map(kernel_root, address, physical, attrs);
+    arch_tlb_flush();
+    return rc;
+}
+int arch_module_unmap(uint64_t address)
+{
+    if (!module_address(address)) return -K_EINVAL;
+    int rc;
+    uint64_t *entry = walk(kernel_root, address, false, &rc);
+    if (!entry || !(*entry & PTE_VALID)) return -K_ENOENT;
+    *entry = 0; arch_tlb_flush(); prune(kernel_root, address);
+    return 0;
+}
+#define FRAMEBUFFER_VA 0xffff000200000000ULL
+void arch_framebuffer_unmap(size_t bytes)
+{
+    for(size_t off=0;off<bytes;off+=PAGE_SIZE){
+        int rc;uint64_t *e=walk(kernel_root,FRAMEBUFFER_VA+off,false,&rc);
+        if(e)*e=0;
+    }
+    arch_tlb_flush();
+    for(size_t off=0;off<bytes;off+=PAGE_SIZE)prune(kernel_root,FRAMEBUFFER_VA+off);
+}
+void *arch_framebuffer_map(uint64_t physical,size_t bytes)
+{
+    if(!final_tables||!bytes||bytes>64U*1024*1024||(physical&(PAGE_SIZE-1))||
+        physical>=0x40000000ULL||bytes>0x40000000ULL-physical)return NULL;
+    for(size_t off=0;off<bytes;off+=PAGE_SIZE){
+        int rc;uint64_t *alias=walk(kernel_root,(uintptr_t)arch_phys_to_virt(physical+off),false,&rc);
+        if(alias&&(*alias&PTE_VALID))return NULL;
+    }
+    size_t off=0;
+    for(;off<bytes;off+=PAGE_SIZE){
+        if(map(kernel_root,FRAMEBUFFER_VA+off,physical+off,(2ULL<<2)|PTE_SH_INNER|PTE_PXN|PTE_UXN)){
+            arch_framebuffer_unmap(off);return NULL;
+        }
+    }
+    arch_tlb_flush();return (void *)(uintptr_t)FRAMEBUFFER_VA;
 }
 static bool translation_fault(uintptr_t va, bool write, bool user)
 {

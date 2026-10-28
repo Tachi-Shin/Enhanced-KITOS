@@ -1,0 +1,95 @@
+Enhanced KITOS Phase 3 validation — 2026-10-27 (Asia/Tokyo)
+
+Scope:
+  Continue the implementation preserved in 75667d2; retain the existing work.
+  Static AArch64 ELF64, private processes, argv/envp/auxv, spawn/wait,
+  per-process FD/heap, Newlib, and FP/SIMD context preservation.
+
+Environment:
+  aarch64-elf-gcc 15.2.0; QEMU 10.2.2 (raspi4b).
+  Apple clang 21.0.0; Python 3.10.6; macOS arm64; mtools; fsck_msdos.
+
+Reproduced failures before the runtime fixes:
+  run /PROBE.ELF limits-busy: timeout after unlink with an open handle.
+  run /PROBE.ELF limits-slots: failed with errno=1 instead of EAGAIN.
+  run /PROBE.ELF limits-heap: sbrk(-current_break) incorrectly succeeded.
+  Raw logs: build/phase3/before-results.json and before-limits-*.txt.
+
+Fixes:
+  Persistent namespace EBUSY returns to the caller instead of retrying forever
+    under a resource pin; close followed by unlink can then make progress.
+  Task creation exhaustion returns EAGAIN and leaves VM ownership with caller.
+  VFS file pool exhaustion returns ENFILE, distinct from EMFILE and disk ENOSPC.
+  Newlib sbrk rejects shrinking to zero, which is the brk-query sentinel.
+  Reaper zombie publication/orphan reclamation is atomic against wait/spawn.
+  Public errno constants are compile-time checked against Newlib.
+  User C/assembly header dependencies and libc/libm relinking are tracked.
+  QEMU transcripts are saved even on failure during the first boot.
+
+Fresh Newlib source build — PASS:
+  make newlib NEWLIB_PREFIX="$PWD/build/phase3/newlib" \
+    NEWLIB_BUILD_DIR="$PWD/build/phase3/newlib-build"
+  Version 4.6.0.20260123, cached source archive; no network download needed.
+  SHA-256: 6ff27e3bf022666f43f7802255be680eeff722ac181b1725d21e2e8318604ee3
+  New configure/build directory and install prefix, target aarch64-elf.
+  Supplied syscalls and multithreading disabled; kernel supplies OS hooks.
+  Existing build/newlib install retained. Source build/install exit code 0.
+
+Full rebuilds — PASS, no KITOS compiler warnings (-Wall -Wextra -Werror):
+  make -B TARGET=qemu -j4 all
+  make -B TARGET=hardware -j4 all
+  make -B -C usr NEWLIB="$PWD/build/phase3/newlib" -j4
+
+Host regression: make -B test — PASS:
+  Block LBA read/write and FAT32 direct/MBR, 8.3/LFN.
+  VFS/FAT32: 7321 checks for each of 512/1024/2048/4096-byte sectors.
+  Timer: 79 checks; SDHCI: 1873; SD protocol: 1031.
+  Page allocator: 2636; DTB/ATAG: 22608.
+  ELF64 validation/load: 21347 checks, 3447 bounded reads.
+
+QEMU regression with freshly built Newlib — PASS:
+  make test-qemu NEWLIB_PREFIX="$PWD/build/phase3/newlib"
+  Exit code 0; approximately 59 seconds in this run.
+  Normal ATAG/SD boot, reboot persistence, no-media monitor, reserved DTB,
+    small-memory DTB, memtest/usertest/selftest, and page/VM OOM rollback.
+  Existing ELF/Newlib stdio/errno/BSS/heap/atexit and child exit/kill/fault/
+    orphan/FD cleanup, invalid ELF rejection and ELF OOM rollback.
+  Concurrent FP/SIMD processes with distinct register/control values.
+  New process boundary tests, on normal/reserved/small-memory boots:
+    - Open/unlink EBUSY, close and successful unlink.
+    - Task saturation returns EAGAIN; kill/wait/reuse repeated twice.
+    - Per-process EMFILE and system ENFILE, close/reopen/reuse.
+    - 16 argv, 16 envp, auxv; strings with spaces and UTF-8.
+    - 4096 total argument bytes accepted; excess count/bytes rejected.
+    - Invalid argv/envp pointers rejected with EFAULT.
+    - Kill/wait of a child blocked in console read.
+    - Heap shrink, zero-fill on regrowth, OOM rollback and smaller retry.
+  Each limits run prints '[limits] process boundaries PASS', exits with 0,
+    leaves no process records, and restores the original free-page count.
+  mcopy persistence comparison and read-only fsck_msdos exit code 0.
+
+Timing investigation:
+  The first expanded suite exceeded the old 15s per-command deadline while a
+    source build was running concurrently. Isolated small-memory limits test
+    finished successfully in 13.12s. Its deadline is now 45s; other commands
+    retain 15s. No process assertion was skipped or weakened.
+
+ELF inspection — PASS:
+  Kernel entry 0x80000; user entry 0x400000; RX/R/RW LOAD segments; no RWX.
+  User GNU_STACK is RW. Both kernels retain the high common-kernel layout.
+
+Logs (ignored build artifacts):
+  build/phase3/newlib-build-result.json, newlib-build.log
+  build/phase3/validation-results.json
+  build/phase3/qemu-build.log, hardware-build.log, users-build.log, host-tests.log
+  build/phase3/qemu-tests.log, qemu-transcript.txt
+  build/phase3/qemu-timeout-transcript.txt, small-diagnostic.txt
+  Standard serial transcript: build/tests/qemu-transcript.txt
+
+Limits:
+  Raspberry Pi 4 hardware execution is not tested; hardware result is build-only.
+  Single core, one low ARM RAM bank, 4 KiB pages, fixed task/FD/VFS pools.
+  VFS namespace operations retain the existing open-file restrictions.
+  fork/COW, dynamic linking, TLS/threads, general signals, FD inheritance/dup/
+    pipe, per-process cwd, RTC/time-of-day, and legacy-app EL0 ports remain
+    outside this phase. Newlib fork/execve/link/gettimeofday/times return ENOSYS.

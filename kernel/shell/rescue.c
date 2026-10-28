@@ -1,4 +1,5 @@
-#include <kernel/monitor.h>
+#include <kernel/diagnostics.h>
+#include <kernel/root.h>
 #include <kernel/console.h>
 #include <kernel/printk.h>
 #include <kernel/task.h>
@@ -11,13 +12,20 @@
 #include <drivers/gpio/gpio.h>
 #include <drivers/uart/uart.h>
 #include <lib/string.h>
+#include <drivers/usb/usb.h>
+#include <kernel/storage.h>
+#include <drivers/usb/input.h>
+#include <kernel/module.h>
 static char cwd[VFS_PATH_MAX] = "/";
 static int path(const char *arg, char *out)
 {
     if (!arg) arg = cwd;
-    size_t n = strlen(arg), prefix = arg[0] == '/' ? 0 : strlen(cwd) + 1;
-    if (n + prefix >= VFS_PATH_MAX) return -K_ENAMETOOLONG;
-    if (prefix) { strcpy(out, cwd); out[prefix - 1] = '/'; }
+    if(!*arg)return -K_ENOENT;
+    size_t n = strlen(arg), prefix = arg[0] == '/' ? 0 : strlen(cwd);
+    bool separator=prefix&&cwd[prefix-1]!='/';
+    if (n + prefix + separator >= VFS_PATH_MAX) return -K_ENAMETOOLONG;
+    if (prefix) memcpy(out,cwd,prefix);
+    if(separator)out[prefix++]='/';
     strcpy(out + prefix, arg);
     return 0;
 }
@@ -57,10 +65,7 @@ static int file_command(const char *command, const char *name, const char *text)
         return vfs_rename(full, target);
     }
     if (!strcmp(command, "cd")) {
-        struct vfs_stat info;
-        rc = vfs_stat(full, &info);
-        if (!rc && info.kind != VFS_DIRECTORY) rc = -K_ENOTDIR;
-        if (!rc) strcpy(cwd, full);
+        do{rc=vfs_resolve_directory(full,cwd);if(rc==-K_EBUSY)task_sleep_ms(1);}while(rc==-K_EBUSY);
         return rc;
     }
     struct file *file;
@@ -93,14 +98,24 @@ static void execute(unsigned int argc, char **argv)
     const char *cmd = argv[0];
     int rc = 0;
     if (!strcmp(cmd, "help")) {
-        printk("help | time | ps | selftest | mem | memtest | usertest | uart | pwd | echo TEXT\n"
+        printk("help | time | ps | selftest | mem | memtest | usertest | uart | display | usb | input | pwd | echo TEXT\n"
                "run PATH [ARGS...] | spawn PATH [ARGS...] | wait PID | procs\n"
+               "insmod PATH | rmmod NAME | lsmod | disks | mount DISK PATH | umount PATH\n"
                "ls [PATH] | cd PATH | cat PATH | touch PATH | mkdir PATH\n"
                "write PATH TEXT | append PATH TEXT | truncate PATH BYTES\n"
                "rm PATH | rmdir PATH | mv OLD NEW (quote names with spaces)\n"
                "stop ID | resume ID | kill ID | sleep ID MS\n"
                "gpio PIN in|out|0|1|up|down|none | gpio PIN\n");
     } else if (!strcmp(cmd, "selftest")) rc = kernel_regression();
+    else if (!strcmp(cmd,"display")) console_print_display();
+    else if (!strcmp(cmd, "usb")) usb_print();
+    else if (!strcmp(cmd, "input")) usb_input_print();
+    else if (!strcmp(cmd,"disks")) storage_print();
+    else if (!strcmp(cmd,"mount")&&argc==3) {uint32_t disk;char full[VFS_PATH_MAX];rc=number(argv[1],&disk);if(!rc)rc=path(argv[2],full);if(!rc)rc=storage_mount(disk,full);}
+    else if (!strcmp(cmd,"umount")&&argc==2) {char full[VFS_PATH_MAX];rc=path(argv[1],full);if(!rc)rc=vfs_unmount(full);}
+    else if (!strcmp(cmd,"lsmod")) module_print();
+    else if (!strcmp(cmd,"insmod") && argc==2) {char full[VFS_PATH_MAX];rc=path(argv[1],full);if(!rc)rc=module_load(full);}
+    else if (!strcmp(cmd,"rmmod") && argc==2) rc=module_unload(argv[1]);
     else if (!strcmp(cmd, "memtest")) rc = memory_regression();
     else if (!strcmp(cmd, "usertest")) rc = user_regression();
     else if (!strcmp(cmd, "oomtest")) rc = memory_pressure_regression();
@@ -169,7 +184,7 @@ static void execute(unsigned int argc, char **argv)
     }
     if (rc) printk("error %d\n", rc);
 }
-/* Small monitor tokenizer: single/double quotes, no expansion or scripting. */
+/* Recovery shell tokenizer: single/double quotes, no expansion or scripting. */
 static int tokenize(char *line, char **args, unsigned int capacity)
 {
     unsigned int n = 0; char *read = line, *write = line;
@@ -192,11 +207,11 @@ static int tokenize(char *line, char **args, unsigned int capacity)
     }
     return (int)n;
 }
-void monitor_task(void *unused)
+void shell_rescue(void *unused)
 {
     (void)unused;
     char line[1024]; unsigned int n = 0; bool discard = false, was_cr = false;
-    printk("[monitor] ready; help for commands\nKITOS> ");
+    printk("[shell] recovery mode; /bin/sh unavailable\nroot@ekitos:/# ");
     for (;;) {
         char c; int rc = console_try_getc(&c);
         if (!rc) { task_sleep_ms(1); continue; }
@@ -208,7 +223,7 @@ void monitor_task(void *unused)
             char *args[PROCESS_ARG_MAX + 1]; int argc = tokenize(line, args, PROCESS_ARG_MAX + 1);
             if (discard || argc < 0) printk("error: input lost, too long, or invalid quoting\n");
             else execute((unsigned int)argc, args);
-            n = 0; discard = false; printk("KITOS> ");
+            n = 0; discard = false; printk("root@ekitos:%s# ", cwd);
         } else if (c == 127 || c == '\b') { if (n) { --n; console_write("\b \b"); } }
         else if ((unsigned char)c >= 32) {
             if (n + 1 >= sizeof(line)) discard = true;

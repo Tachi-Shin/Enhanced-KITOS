@@ -11,12 +11,36 @@
 #include "arch_syscall.h"
 #include <uapi/syscall.h>
 extern int fp_probe(unsigned long seed);
+extern int process_limits(int argc, char **argv);
 static volatile unsigned char bss[17000];
 static volatile int initialized = 12345;
 static void failed(int line)
 { fprintf(stderr, "[newlib] FAIL line=%d errno=%d\n", line, errno); exit(101); }
 #define CHECK(x) do { if (!(x)) failed(__LINE__); } while (0)
 static void goodbye(void) { puts("[newlib] atexit PASS"); }
+static void input_test(void)
+{
+    struct kitos_input_event events[KITOS_INPUT_BATCH_MAX];
+    CHECK(kitos_input_read(NULL, 0) == 0);
+    errno = 0;
+    CHECK(kitos_input_read(events, KITOS_INPUT_BATCH_MAX + 1) == -1 && errno == EINVAL);
+    while (kitos_input_read(events, KITOS_INPUT_BATCH_MAX) > 0) {}
+    uint64_t start = kitos_clock_ms();
+    puts("[user-input] ready"); fflush(stdout);
+    while (kitos_clock_ms() - start < 3000) {
+        CHECK(kitos_raw_syscall(KITOS_SYS_INPUT_READ, -1, 1, 0) == -EFAULT);
+        int count = kitos_input_read(events, KITOS_INPUT_BATCH_MAX); CHECK(count >= 0);
+        for (int i = 0; i < count; ++i) {
+            struct kitos_input_event *e = &events[i];
+            CHECK(!e->reserved && e->time_ms >= start);
+            if (e->type == KITOS_INPUT_POINTER && e->code == 1 && e->x == 13 && e->y == -9) {
+                puts("[user-input] mouse/uaccess/batch PASS"); return;
+            }
+        }
+        CHECK(kitos_sleep_ms(1) == 0);
+    }
+    failed(__LINE__);
+}
 static void file_test(void)
 {
     FILE *f = fopen("/USER.TXT", "w+"); CHECK(f);
@@ -79,9 +103,32 @@ static void family_test(void)
     CHECK(unlink("/LEAK.TXT") == 0);
     puts("[newlib] spawn/envp/wait/kill/fault/orphan/FD-cleanup PASS");
 }
+static void usb_unplug_test(const char *path)
+{
+    int fd=open(path,O_RDONLY);CHECK(fd>=0);
+    puts("[user-usb] ready");fflush(stdout);
+    CHECK(kitos_sleep_ms(800)==0);
+    char byte;errno=0;CHECK(read(fd,&byte,1)==-1&&errno==ENODEV);
+    CHECK(close(fd)==0);puts("[user-usb] unplug/ENODEV/close PASS");
+}
+static void usb_large_test(const char *path)
+{
+    CHECK(sizeof(off_t)>=8);int fd=open(path,O_RDWR);CHECK(fd>=0);
+    const off_t offset=(off_t)0x100000011LL;char bytes[14];
+    CHECK(lseek(fd,offset,SEEK_SET)==offset);CHECK(read(fd,bytes,sizeof(bytes))==sizeof(bytes));
+    CHECK(!memcmp(bytes,"UPDATED-4GIB!!",sizeof(bytes)));
+    CHECK(lseek(fd,offset,SEEK_SET)==offset);CHECK(write(fd,"EL0-above-4GiB",14)==14);CHECK(close(fd)==0);
+    fd=open(path,O_RDONLY);CHECK(fd>=0);CHECK(lseek(fd,offset,SEEK_SET)==offset);
+    CHECK(read(fd,bytes,14)==14&&!memcmp(bytes,"EL0-above-4GiB",14));CHECK(close(fd)==0);
+    puts("[user-usb] exFAT seek/read/write above 4GiB PASS");
+}
 int main(int argc, char **argv)
 {
     CHECK(argc >= 1 && argv[argc] == NULL);
+    if(argc==3&&!strcmp(argv[1],"usb-large")){usb_large_test(argv[2]);return 0;}
+    if(argc==3&&!strcmp(argv[1],"usb-unplug")){usb_unplug_test(argv[2]);return 0;}
+    if (argc > 1 && !strcmp(argv[1], "input")) { input_test(); return 0; }
+    if (argc > 1 && !strncmp(argv[1], "limits", 6)) return process_limits(argc, argv);
     if (argc > 1 && !strcmp(argv[1], "orphan")) { child("child"); return 0; }
     if (argc > 1 && (!strcmp(argv[1], "child") || !strcmp(argv[1], "hold") || !strcmp(argv[1], "fault"))) {
         CHECK(getenv("KITOS_CHILD") && !strcmp(getenv("KITOS_CHILD"), "yes"));

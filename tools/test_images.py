@@ -9,7 +9,7 @@ import tempfile
 
 SIZE = 128 * 1024 * 1024
 
-def create(path, offset=0, sector_size=512):
+def create(path, offset=0, sector_size=512, fixture_files=True):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open('xb') as f:
@@ -25,6 +25,7 @@ def create(path, offset=0, sector_size=512):
             mbr[510:] = b'\x55\xaa'
             f.write(mbr)
     for source, name in [('hello.txt', 'HELLO.TXT'), ('long-name.txt', 'Long File Name.txt'), ('mbr.txt', 'MBRFILE.TXT')]:
+        if not fixture_files: break
         subprocess.run(['mcopy', '-i', target, str(Path(__file__).resolve().parent.parent / 'tests/fixtures' / source), '::' + name], check=True)
 
 def suite(directory, sector_size=512):

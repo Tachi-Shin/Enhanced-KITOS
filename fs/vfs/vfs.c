@@ -2,6 +2,7 @@
 #include <kernel/error.h>
 #include <kernel/sync.h>
 #include <lib/string.h>
+#include <block/block.h>
 
 #define TYPE_COUNT 4U
 static const struct filesystem_type *types[TYPE_COUNT];
@@ -11,6 +12,7 @@ struct file {
     struct mount *mount;
     uint64_t position;
     unsigned int flags;
+    unsigned int references;
     bool used;
 };
 static struct file files[VFS_MAX_FILES];
@@ -96,22 +98,24 @@ int vfs_register(const struct filesystem_type *type)
     }
     kernel_gate_release(&gate); return rc;
 }
-int vfs_mount(const char *type, const char *path, struct block_device *device, const void *options)
+static int mount_volume(const char *type,const char *path,struct block_device *device,const void *options,bool virtual)
 {
     if (!type || !path || !device) return -K_EINVAL;
     if (!kernel_gate_try(&gate)) return -K_EBUSY;
     char canonical[VFS_PATH_MAX];
-    int rc = resolve(path, canonical, false);
+    int rc = resolve(path, canonical, virtual);
     struct mount *slot = NULL;
     const struct filesystem_type *fs = NULL;
     if (rc) goto out;
     if (!same(canonical, "/")) {
         struct inode node; struct mount *parent;
         rc = lookup(canonical, &node, &parent);
+        if(rc==-K_ENOENT&&virtual){rc=0;goto parent_ok;}
         if (rc) goto out;
         if (node.kind != VFS_DIRECTORY) { rc = -K_ENOTDIR; goto out; }
-        if (parent->open_files) { rc = -K_EBUSY; goto out; }
+        if (!virtual&&parent->open_files) { rc = -K_EBUSY; goto out; }
     }
+parent_ok:
     for (unsigned int i = 0; i < VFS_MAX_MOUNTS; ++i) {
         if (!mounts[i].used) slot = &mounts[i];
         else if (same(mounts[i].path, canonical) || mounts[i].sb.device == device) {
@@ -122,16 +126,25 @@ int vfs_mount(const char *type, const char *path, struct block_device *device, c
         if (types[i] && same(types[i]->name, type)) fs = types[i];
     if (!slot || !fs) { rc = !slot ? -K_ENOSPC : -K_ENODEV; goto out; }
     slot->sb = (struct super_block){.type = fs, .device = device};
+    rc=block_hold(device);if(rc)goto out;
     rc = fs->mount(&slot->sb, device, options);
     if (!rc) { strcpy(slot->path, canonical); slot->used = true; slot->open_files = 0; }
+    else block_put(device);
 out:
     kernel_gate_release(&gate); return rc;
 }
+int vfs_mount(const char *t,const char *p,struct block_device *d,const void *o)
+{return mount_volume(t,p,d,o,false);}
+int vfs_mount_virtual(const char *t,const char *p,struct block_device *d)
+{return mount_volume(t,p,d,NULL,true);}
 int vfs_unmount(const char *path)
 {
+    if(!path)return -K_EINVAL;
     if (!kernel_gate_try(&gate)) return -K_EBUSY;
     char canonical[VFS_PATH_MAX];
-    int rc = resolve(path, canonical, false);
+    bool exact=false;
+    for(unsigned int i=0;i<VFS_MAX_MOUNTS;++i)if(mounts[i].used&&!strcmp(mounts[i].path,path))exact=true;
+    int rc=0;if(exact)strcpy(canonical,path);else rc=resolve(path,canonical,false);
     if (rc) goto out;
     struct mount *mount = select_mount(canonical);
     if (!mount || !same(mount->path, canonical)) { rc = -K_EINVAL; goto out; }
@@ -140,9 +153,44 @@ int vfs_unmount(const char *path)
         if (mounts[i].used && &mounts[i] != mount && under(mounts[i].path, canonical)) {
             rc = -K_EBUSY; goto out;
         }
-    mount->sb.ops->release(&mount->sb); mount->used = false;
+    rc=mount->sb.device->offline?0:block_sync(mount->sb.device);if(rc)goto out;
+    mount->sb.ops->release(&mount->sb); mount->used = false;block_put(mount->sb.device);
 out:
     kernel_gate_release(&gate); return rc;
+}
+int vfs_mount_path(struct block_device *device,char *out)
+{
+    if(!out)return -K_EINVAL;
+    if(!kernel_gate_try(&gate))return -K_EBUSY;
+    int rc=-K_ENOENT;
+    for(unsigned int i=0;i<VFS_MAX_MOUNTS;++i)if(mounts[i].used&&mounts[i].sb.device==device){strcpy(out,mounts[i].path);rc=0;break;}
+    kernel_gate_release(&gate);return rc;
+}
+int vfs_unmount_device(struct block_device *device)
+{
+    if(!kernel_gate_try(&gate))return -K_EBUSY;
+    int rc=-K_ENOENT;
+    for(unsigned int i=0;i<VFS_MAX_MOUNTS;++i){struct mount *m=&mounts[i];
+        if(!m->used||m->sb.device!=device)continue;
+        rc=-K_EBUSY;if(m->open_files)break;
+        bool child=false;
+        for(unsigned int j=0;j<VFS_MAX_MOUNTS;++j)if(i!=j&&mounts[j].used&&under(mounts[j].path,m->path))child=true;
+        if(child)break;
+        rc=device->offline?0:block_sync(device);if(rc)break;
+        m->sb.ops->release(&m->sb);m->used=false;block_put(device);rc=0;break;
+    }
+    kernel_gate_release(&gate);return rc;
+}
+int vfs_resolve_directory(const char *path,char *out)
+{
+    if(!out)return -K_EINVAL;
+    if(!kernel_gate_try(&gate))return -K_EBUSY;
+    char canonical[VFS_PATH_MAX];struct inode node;struct mount *mount;
+    int rc=resolve(path,canonical,false);
+    if(!rc)rc=lookup(canonical,&node,&mount);
+    if(!rc&&node.kind!=VFS_DIRECTORY)rc=-K_ENOTDIR;
+    if(!rc)strcpy(out,canonical);
+    kernel_gate_release(&gate);return rc;
 }
 int vfs_stat(const char *path, struct vfs_stat *out)
 {
@@ -151,7 +199,7 @@ int vfs_stat(const char *path, struct vfs_stat *out)
     char canonical[VFS_PATH_MAX]; struct inode node; struct mount *mount;
     int rc = resolve(path, canonical, false);
     if (!rc) rc = lookup(canonical, &node, &mount);
-    if (!rc) *out = (struct vfs_stat){node.number, node.size, node.kind, node.attributes};
+    if (!rc) *out = (struct vfs_stat){node.number, node.size, node.kind, node.attributes, (unsigned int)(mount-mounts)+1};
     kernel_gate_release(&gate); return rc;
 }
 int vfs_open(const char *path, unsigned int flags, struct file **out)
@@ -167,7 +215,7 @@ int vfs_open(const char *path, unsigned int flags, struct file **out)
     struct file *slot = NULL;
     if (rc) goto done;
     for (unsigned int i = 0; i < VFS_MAX_FILES; ++i) if (!files[i].used) { slot = &files[i]; break; }
-    if (!slot) { rc = -K_ENOSPC; goto done; }
+    if (!slot) { rc = -K_ENFILE; goto done; }
     rc = lookup(canonical, &node, &mount);
     if (rc == -K_ENOENT && (flags & VFS_CREATE)) {
         rc = mount->sb.ops->create(&mount->sb, relative(mount, canonical), false);
@@ -178,15 +226,22 @@ int vfs_open(const char *path, unsigned int flags, struct file **out)
     if ((flags & VFS_WRITE) && (node.attributes & 1U)) { rc = -K_EROFS; goto done; }
     if ((flags & VFS_TRUNC) && (rc = node.sb->file_ops->truncate(&node, 0))) goto done;
     slot->inode = node; slot->mount = mount; slot->position = 0; slot->flags = flags;
-    slot->used = true; ++mount->open_files; *out = slot;
+    slot->used = true; slot->references=1; ++mount->open_files; *out = slot;
 done:
     kernel_gate_release(&gate); return rc;
+}
+int vfs_retain(struct file *file)
+{
+    if(!kernel_gate_try(&gate))return -K_EBUSY;
+    int rc=-K_EBADF;
+    if(valid_file(file)&&file->references<0x7fffffffU){++file->references;rc=0;}
+    kernel_gate_release(&gate);return rc;
 }
 int vfs_close(struct file *file)
 {
     if (!kernel_gate_try(&gate)) return -K_EBUSY;
     int rc = -K_EBADF;
-    if (valid_file(file)) { --file->mount->open_files; file->used = false; rc = 0; }
+    if (valid_file(file)) {if(!--file->references){--file->mount->open_files;file->used=false;}rc=0;}
     kernel_gate_release(&gate); return rc;
 }
 int vfs_fstat(struct file *file, struct vfs_stat *out)
@@ -195,7 +250,7 @@ int vfs_fstat(struct file *file, struct vfs_stat *out)
     if (!kernel_gate_try(&gate)) return -K_EBUSY;
     int rc = -K_EBADF;
     if (valid_file(file) && !(rc = refresh(file)))
-        *out = (struct vfs_stat){file->inode.number, file->inode.size, file->inode.kind, file->inode.attributes};
+        *out = (struct vfs_stat){file->inode.number, file->inode.size, file->inode.kind, file->inode.attributes, (unsigned int)(file->mount-mounts)+1};
     kernel_gate_release(&gate);
     return rc;
 }
@@ -278,6 +333,16 @@ int vfs_rename(const char *old_path, const char *new_path)
 out:
     kernel_gate_release(&gate); return rc;
 }
+struct mounted_listing {
+    vfs_dir_callback callback;void *user;
+    const char *names[VFS_MAX_MOUNTS];bool seen[VFS_MAX_MOUNTS];
+};
+static int mount_listing(void *context,const struct vfs_dirent *entry)
+{
+    struct mounted_listing *list=context;
+    for(unsigned int i=0;i<VFS_MAX_MOUNTS;++i)if(list->names[i]&&!strcmp(list->names[i],entry->name))list->seen[i]=true;
+    return list->callback(list->user,entry);
+}
 int vfs_list(const char *path, vfs_dir_callback callback, void *user)
 {
     if (!callback) return -K_EINVAL;
@@ -286,6 +351,17 @@ int vfs_list(const char *path, vfs_dir_callback callback, void *user)
     int rc = resolve(path, canonical, false);
     if (!rc) rc = lookup(canonical, &node, &mount);
     if (!rc && node.kind != VFS_DIRECTORY) rc = -K_ENOTDIR;
-    if (!rc) rc = mount->sb.ops->list(&mount->sb, relative(mount, canonical), callback, user);
+    struct mounted_listing list={.callback=callback,.user=user};
+    if(!rc){
+        size_t n=strlen(canonical);
+        for(unsigned int i=0;i<VFS_MAX_MOUNTS;++i)if(mounts[i].used&&under(mounts[i].path,canonical)&&strcmp(mounts[i].path,canonical)){
+            const char *name=mounts[i].path+n;if(*name=='/')++name;
+            if(!strchr(name,'/'))list.names[i]=name;
+        }
+        rc=mount->sb.ops->list(&mount->sb,relative(mount,canonical),mount_listing,&list);
+        for(unsigned int i=0;!rc&&i<VFS_MAX_MOUNTS;++i)if(list.names[i]&&!list.seen[i]){
+            struct vfs_dirent entry={.kind=VFS_DIRECTORY};strcpy(entry.name,list.names[i]);rc=callback(user,&entry);
+        }
+    }
     kernel_gate_release(&gate); return rc;
 }

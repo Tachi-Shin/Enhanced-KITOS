@@ -33,7 +33,8 @@ int task_create(
     void *argument
 );
 
-/* Takes ownership of space on success (clears the caller's root). */
+/* Takes ownership of space on success (clears the caller's root).
+ * Returns -K_EINVAL for invalid input, -K_EAGAIN when task slots/IDs run out. */
 int task_create_user(const char *name, struct vm_space *space, uint64_t entry,
                      uint64_t stack, uint64_t argument);
 int task_init_stacks(void);
@@ -55,6 +56,10 @@ void task_yield(void);
  * 成功時0、実行コンテキストが不正な場合は-1。
  */
 int task_sleep_ms(uint32_t milliseconds);
+/* Atomic epoch check + sleep, avoiding lost notifications. deadline=0 means
+ * infinite. Caller has IRQs enabled and holds no resource pins while waiting. */
+int task_event_wait(volatile uint64_t *epoch,uint64_t seen,uint64_t deadline);
+void task_event_wake(volatile uint64_t *epoch);
 
 /* 指定した別タスクを休止させる。millisecondsは1以上。 */
 int task_sleep(uint32_t id, uint32_t milliseconds);

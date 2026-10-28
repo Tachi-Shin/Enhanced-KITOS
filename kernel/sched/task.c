@@ -1,6 +1,7 @@
 // kernel/sched/task.c
 #include <kernel/task.h>
 #include <kernel/timer.h>
+#include <kernel/clock.h>
 #include <kernel/vm.h>
 #include <kernel/error.h>
 #include <kernel/process.h>
@@ -36,6 +37,7 @@ struct task {
 
     /* このタスクのsleepで使用するタイマー */
     struct timer_event sleep_timer;
+    volatile uint64_t *wait_epoch;
 
     struct arch_context context;
 };
@@ -189,8 +191,9 @@ static void wake_sleeping_task(void *argument)
 {
     struct task *task = argument;
 
-    if (task->state == TASK_SLEEPING) {
+    if (task->state == TASK_SLEEPING || task->state == TASK_BLOCKED) {
         task->state = TASK_READY;
+        task->wait_epoch=NULL;
     }
 
     /*
@@ -294,7 +297,7 @@ int task_create(
          * 再利用する枠に古いタイマーを残さない。
          */
         (void)kernel_timer_cancel(&task->sleep_timer);
-        task->sleep_timer = (struct timer_event){0};
+        task->sleep_timer = (struct timer_event){0};task->wait_epoch=NULL;
 
         arch_context_init(
             &task->context,
@@ -325,6 +328,33 @@ void task_yield(void)
     arch_irq_restore(flags);
 }
 
+void task_event_wake(volatile uint64_t *epoch)
+{
+    uint64_t flags=arch_irq_save();
+    for(unsigned int i=0;i<MAX_TASKS;++i){
+        struct task *t=&task_table[i];
+        if(t->state==TASK_BLOCKED&&t->wait_epoch==epoch){
+            (void)kernel_timer_cancel(&t->sleep_timer);t->wait_epoch=NULL;t->state=TASK_READY;
+        }
+    }
+    arch_irq_restore(flags);
+}
+int task_event_wait(volatile uint64_t *epoch,uint64_t seen,uint64_t deadline)
+{
+    uint64_t flags=arch_irq_save();
+    if(!epoch||(flags&(1ULL<<7))||!current_task||current_task==&idle_task||current_task->state!=TASK_RUNNING){arch_irq_restore(flags);return -K_EINVAL;}
+    if(*epoch!=seen){arch_irq_restore(flags);return 0;}
+    if(deadline){
+        uint64_t now=clock_ms();if(now>=deadline){arch_irq_restore(flags);return -K_ETIMEDOUT;}
+        uint64_t remaining=deadline-now;uint32_t delay=remaining>0xffffffffU?0xffffffffU:(uint32_t)remaining;
+        if(kernel_timer_arm(&current_task->sleep_timer,delay,wake_sleeping_task,current_task)){
+            arch_irq_restore(flags);return -K_EINVAL;
+        }
+    }
+    current_task->wait_epoch=epoch;current_task->state=TASK_BLOCKED;
+    switch_to_task(select_next_task());current_task->wait_epoch=NULL;
+    arch_irq_restore(flags);task_check_cancel();return 0;
+}
 int task_sleep_ms(uint32_t milliseconds)
 {
     uint64_t flags = arch_irq_save();
@@ -472,7 +502,7 @@ int task_control(
     }
 
     if (operation == TASK_STOP &&
-        (task->state == TASK_READY ||
+        (task->state == TASK_READY || task->state == TASK_BLOCKED ||
          task->state == TASK_SLEEPING)) {
         /* 自動復帰を解除して、無期限停止へ変更する。 */
         (void)kernel_timer_cancel(&task->sleep_timer);
@@ -481,7 +511,7 @@ int task_control(
         result = 0;
 
     } else if (operation == TASK_RESUME &&
-               (task->state == TASK_STOPPED ||
+               (task->state == TASK_STOPPED || task->state == TASK_BLOCKED ||
                 task->state == TASK_SLEEPING)) {
         /* sleepの期限を待たず、実行可能にする。 */
         (void)kernel_timer_cancel(&task->sleep_timer);
@@ -490,7 +520,7 @@ int task_control(
         result = 0;
 
     } else if (operation == TASK_KILL &&
-               (task->state == TASK_READY ||
+               (task->state == TASK_READY || task->state == TASK_BLOCKED ||
                 task->state == TASK_STOPPED ||
                 task->state == TASK_SLEEPING)) {
         /* 終了後に古いタイマーで復活しないよう解除する。 */
@@ -586,7 +616,7 @@ static void user_bootstrap(void *unused)
 int task_create_user(const char *name, struct vm_space *space, uint64_t entry,
                      uint64_t stack, uint64_t argument)
 {
-    if (!space || !space->root || (entry & 3) || (stack & 15) || stack < 16 ||
+    if (!name || !space || !space->root || (entry & 3) || (stack & 15) || stack < 16 ||
         vm_user_check(space, entry, 4, VM_EXEC) ||
         vm_user_check(space, stack - 16, 16, VM_WRITE)) return -K_EINVAL;
     uint64_t flags = arch_irq_save();
@@ -599,7 +629,7 @@ int task_create_user(const char *name, struct vm_space *space, uint64_t entry,
         task->user_entry = entry;
         task->user_stack = stack;
         task->user_argument = argument;
-    }
+    } else id = -K_EAGAIN;
     arch_irq_restore(flags);
     return id;
 }

@@ -1,0 +1,124 @@
+Historical ABI 3 / SuperSpeed milestone. ABI 4, module-based boot, Unix root,
+EL0 shell and /media/usbN were added afterward. See unix-system.md and
+unix-system-validation.txt for the current system.
+
+Enhanced KITOS USB 3.0 SuperSpeed validation
+2026-10-28 (Asia/Tokyo)
+
+Scope:
+  Extend the existing USB 2 / PCIe-VL805 / loadable C driver work in place.
+  Add USB 3 Gen1 x1 (5 Gbit/s) enumeration and BOT/SCSI storage, with USB 2
+  HID devices sharing the controller. No physical device was used or modified.
+  Existing uncommitted work retained; no reset/checkout/clean/commit performed.
+
+Environment:
+  macOS arm64, Apple clang 21, AArch64 GCC 15.2, QEMU 10.2.2, Python 3.
+  QEMU: /Users/shingo/qemu-10.2.2/bin/qemu-system-aarch64
+  Independent FAT/exFAT fixtures: mtools and exfat-utils 1.4.0.
+
+Implementation:
+  Supported Protocol capabilities, opaque Slot Type, standard/custom PSI IDs.
+  USB 3 root Hot/Warm Reset, recoverable Inactive/Compliance/CAS detection.
+  Shared kernel/native standard enumeration: 512-byte EP0, BOS/SS capability,
+    mandatory endpoint companion parsing, 1024-byte bulk MaxPacket, MaxBurst,
+    interrupt interval and MaxESITPayload. U1/U2 power saving disabled.
+  SS hub descriptor, SET_HUB_DEPTH, port power, U1/U2 timeout requests,
+    port reset/change acknowledgement and downstream speed decoding.
+  Physical root disconnect during an active TD returns ENODEV while retaining
+    controller-owned DMA until Disable Slot; other ports remain operational.
+  BOT reset recovery resets halted endpoints with Reset Endpoint and idle or
+    stopped endpoints with Configure Endpoint Drop+Add, preserving sequence.
+  C driver ABI advanced to 3 for widened EP0 size and endpoint companions.
+    Kernel and every .EKM must be updated together. ABI 1/2 is rejected.
+
+Builds -- PASS (-Wall -Wextra -Werror):
+  make users drivers
+  make TARGET=qemu -j4
+  make TARGET=hardware -j4
+  make drivers-native
+  make build/host/xhci.so build/host/xhci_storage.so
+  HID.EKM, PI4USB.EKM, STORAGE.EKM and HELLO.EKM built with ABI 3.
+
+Host regression -- PASS (make test):
+  SuperSpeed parser/protocol/shared enumeration/hub requests: 664 checks,
+    ASan/UBSan, non-recovering. Includes malformed/truncated descriptors,
+    missing/orphan companions, reserved fields, alternate settings, BOS,
+    custom PSI speed ID 9 / Slot Type 7, empty protocol port groups, SS hub
+    request transcript and USB 2 versus USB 3 port speed interpretation.
+  Existing USB descriptor/Boot HID: 363 checks.
+  BCM2711 PCIe sequence/error bounds: 1414 checks.
+  Driver ELF validation/failure injection: 193164 checks across actual modules.
+  FAT12/16/32/exFAT VFS: 66782 checks, ASan/UBSan; offline manual unmount added.
+  BOT/SCSI: 84 checks, ASan/UBSan.
+  Timer deadlines/cancel/rearm/budget/wrap: 83 checks, ASan/UBSan.
+    Injected clock advance past a positive relative deadline before queuing:
+    it is queued as due, without an inline callback; absolute past deadlines
+    remain invalid. Prevents spurious sleep failure on a delayed QEMU vCPU.
+  Existing block/FAT32/VFS/SDHCI/SD/geometry/page/boot-memory/ELF suites pass.
+
+Production C xHCI + enumeration + MSC + FAT/exFAT against real QEMU USB 3:
+  python3 tools/storage_xhci_test.py --super --qemu <QEMU> -- PASS
+  Uses qemu-xhci with USB 3 ports enabled and usb-storage at SuperSpeed;
+    no USB 2 fallback. Kernel and native bridge share enumerate.c.
+  Verified device speed=USB_SUPER, EP0=512, two bulk endpoints MPS=1024,
+    companion bMaxBurst=15 (16 packets). Inspected actual controller output
+    contexts: Slot Speed ID=4, EP0 MaxPacket=512, bulk MaxPacket/MaxBurst.
+  Injected recoverable Inactive link with CCS=0, then issued an actual Warm
+    Reset to QEMU. Exactly one WPR observed; enumeration completed.
+  Simultaneous USB 2 keyboard/mouse enumeration; real QMP key event/report.
+  exFAT Japanese filename, 17011-byte multi-block write/read/flush.
+  Corrupt one CSW tag: BOT reset and endpoint sequence reset, next read works.
+  Three physical QMP device_del/device_add cycles; slot reuse, file persistence.
+  Remove the QEMU disk at the bulk IN doorbell during a filesystem read:
+    returns ENODEV, controller does not halt, USB 2 keyboard 'b' still works.
+    Disable Slot and stop eventually reclaim every DMA allocation.
+  Reboot into read-only virtual disk, verify bytes and EROFS.
+  Mounted block object pins C module; offline unmount and eventual fini work.
+
+USB 2 and kernel regression -- PASS:
+  storage_xhci_test.py (p3=0): xHCI/BOT/exFAT RW, reboot/RO, module/DMA lifetime.
+  xhci_qtest.py: keyboard/mouse input, short control, STALL recovery, external
+    USB 2 hub/route string, ring wrap/slot reuse, rollback/timeout, failed halt
+    retains DMA until confirmed stop.
+  storage_qemu_test.py: full EKITOS + STORAGE.EKM + DWC2; FAT12/16/32, exFAT,
+    4096-byte logical sectors, MBR/GPT, Unicode, rename/truncate/remount,
+    two disks behind a hub, write protection, EL0 open-FD unplug/replug,
+    one BOT interface with two independent LUNs. Independent fsck where available.
+  test_large_exfat.py: sparse 8 GiB volume, file offset 0x100000011 through
+    host VFS and EKITOS EL0/USB; independent exfatfsck before/after writes.
+  usb_qemu_test.py: HID.EKM console/EL0 input, hub/hotplug/release/reuse.
+  module_qemu_test.py: malformed/ABI/duplicate rejection, pool limit/rollback,
+    out-of-order unload and HID reload.
+  qemu_test.py: UART/IRQ/tasks/SD/VFS/persistence/no-media/MMU/EL0/DTB/OOM,
+    ELF/Newlib/process/FP and earlier process-boundary checks.
+
+Execution notes:
+  An initial run of six QEMU suites concurrently returned EINVAL in process
+    wait. Review found a relative-timer deadline race, now reproduced and fixed
+    with the injected-clock host test. A USB 2 storage run also timed out,
+    including one later rerun; its exact cause was not established;
+    subsequent complete runs passed. No timeout was counted as a pass.
+  Kernel tests were repeated after the timer fix. Physical Pi 4 remains untested.
+
+Logs (ignored build artifacts):
+  build/tests/ss-host-all.txt, ss-timer.txt
+  build/tests/ss-qemu-build.txt, ss-hardware-build.txt
+  build/tests/ss-drivers-build.txt, ss-drivers-native.txt, ss-native-build.txt
+  build/tests/ss-storage-qtest.txt, ss-xhci-storage-usb2.txt, ss-xhci-usb2.txt
+  build/tests/ss-full-qemu.txt, ss-modules-qemu.txt
+  build/tests/ss-usb2-storage-regression.txt, ss-usb2-hid-regression.txt
+  build/tests/ss-exfat-large.txt
+
+Limits:
+  Pi 4 PCIe/VL805/PHY/power/firmware and real device interoperability unverified.
+  5 Gbit/s identifies the supported link mode, not measured throughput.
+  QEMU raspi4b has no PCIe/xHCI model. Full EKITOS tests run on raspi4b/DWC2;
+    SS tests run the same C sources on the PC against QEMU virt PCI MMIO/DMA.
+    This is not an EKITOS kernel port to virt or physical VL805 validation.
+  QEMU's standard hub is USB 2. SS hub control is mock-tested; actual SS hub
+    enumeration, hotplug and routing remain unverified.
+  No SuperSpeedPlus 10/20 Gbit/s/multiple lanes, UAS/streams, isochronous,
+    USB link power saving, camera/audio/network class drivers or all-device claim.
+  Supported classes remain Boot HID and BOT/SCSI storage. SS HID packet/context
+    handling is implemented but no actual SS HID device model was available.
+  See usb-superspeed.md, usb-storage.md and ../sdk/README.md.

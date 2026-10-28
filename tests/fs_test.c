@@ -28,9 +28,20 @@ int main(int argc, char **argv)
     CHECK(vfs_mount("fat32", "/", &disk, NULL) == 0);
     struct vfs_stat st;
     CHECK(vfs_stat("/", &st) == 0 && st.kind == VFS_DIRECTORY);
+    char resolved[VFS_PATH_MAX]="unchanged";
+    CHECK(!vfs_resolve_directory("/../../",resolved)&&!strcmp(resolved,"/"));
+    CHECK(vfs_resolve_directory("/missing/..",resolved)==-K_ENOENT&&!strcmp(resolved,"/"));
+    CHECK(vfs_resolve_directory("/HELLO.TXT/..",resolved)==-K_ENOTDIR&&!strcmp(resolved,"/"));
+    CHECK(vfs_resolve_directory("/HELLO.TXT",resolved)==-K_ENOTDIR&&!strcmp(resolved,"/"));
+    CHECK(vfs_resolve_directory("relative",resolved)==-K_EINVAL&&!strcmp(resolved,"/"));
+    CHECK(vfs_resolve_directory("/",NULL)==-K_EINVAL);
+    CHECK(vfs_resolve_directory(NULL,resolved)==-K_EINVAL&&!strcmp(resolved,"/"));
     CHECK(vfs_mkdir("/test") == 0);
     CHECK(vfs_mkdir("/test") == -K_EEXIST);
     CHECK(vfs_mkdir("/test/child") == 0);
+    CHECK(!vfs_resolve_directory("//test/./child/..//",resolved)&&!strcmp(resolved,"/test"));
+    strcpy(resolved,"/test/child/../..");
+    CHECK(!vfs_resolve_directory(resolved,resolved)&&!strcmp(resolved,"/"));
     struct file *f, *second;
     CHECK(vfs_open("/test/日本語 😀 long name.txt", VFS_READ | VFS_WRITE | VFS_CREATE | VFS_EXCL, &f) == 0);
     CHECK(vfs_unmount("/") == -K_EBUSY);
@@ -87,6 +98,7 @@ int main(int argc, char **argv)
     CHECK(vfs_mkdir("/mnt") == 0);
     CHECK(vfs_mount("fat32", "/mnt", &other, NULL) == 0);
     CHECK(vfs_stat("/mnt/MBRFILE.TXT", &st) == 0);
+    CHECK(!vfs_resolve_directory("/mnt/..",resolved)&&!strcmp(resolved,"/"));
     CHECK(vfs_rename("/HELLO.TXT", "/mnt/hello.txt") == -K_EXDEV);
     CHECK(vfs_unmount("/") == -K_EBUSY);
     CHECK(vfs_rmdir("/mnt") == -K_EBUSY);
@@ -94,7 +106,7 @@ int main(int argc, char **argv)
     CHECK(vfs_rmdir("/mnt") == 0);
     struct file *handles[VFS_MAX_FILES];
     for (unsigned int i = 0; i < VFS_MAX_FILES; ++i) CHECK(vfs_open("/HELLO.TXT", VFS_READ, &handles[i]) == 0);
-    CHECK(vfs_open("/HELLO.TXT", VFS_READ, &f) == -K_ENOSPC);
+    CHECK(vfs_open("/HELLO.TXT", VFS_READ, &f) == -K_ENFILE);
     for (unsigned int i = 0; i < VFS_MAX_FILES; ++i) CHECK(vfs_close(handles[i]) == 0);
     CHECK(vfs_unmount("/") == 0);
     struct fat32_fs fs;

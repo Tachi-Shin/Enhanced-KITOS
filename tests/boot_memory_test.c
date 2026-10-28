@@ -26,6 +26,9 @@ static unsigned int fixture(unsigned int cell_count)
     put(40, 0); put(44, 0x5000); put(48, 0); put(52, 0x1000);
     begin("");
     prop("#address-cells", &cell_count, 1); prop("#size-cells", &cell_count, 1);
+    begin("memory@0");
+    uint32_t ram[] = {0, 0, 0, 0x3c000000}, small_ram[] = {0, 0x3c000000};
+    prop("reg", cell_count == 2 ? ram : small_ram, cell_count == 2 ? 4 : 2); word(2);
     begin("reserved-memory"); prop("ranges", NULL, 0);
     begin("firmware@8000");
     uint32_t regs[] = {0, 0x8000, 0, 0x2000, 0, 0xD000, 0, 0x1000};
@@ -55,6 +58,7 @@ int main(void)
         unsigned int length = fixture(cells);
         CHECK(boot_memory_read(blob, length, &out) == 0);
         CHECK(out.count == 4 && out.dtb_size == length);
+        CHECK(out.ram.base == 0 && out.ram.size == 0x3c000000);
         CHECK(out.reserved[0].base == 0x5000 && out.reserved[0].size == 0x1000);
         CHECK(out.reserved[1].base == 0x8000 && out.reserved[1].size == 0x2000);
         CHECK(out.reserved[2].base == 0xD000 && out.reserved[2].size == 0x1000);

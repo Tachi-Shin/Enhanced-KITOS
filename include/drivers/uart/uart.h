@@ -16,6 +16,8 @@ struct uart_ops {
     void (*putc)(struct uart_device *dev, char c);
 
     void (*enable_rx_irq)(struct uart_device *dev);
+    /* IRQs are masked by the caller. Must be bounded and safe without a
+     * pending IRQ: uart_try_getc also uses this to drain the RX FIFO. */
     void (*handle_irq)(struct uart_device *dev);
 };
 

@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>USBカメラビューア</title>
+<style>
+:root{color-scheme:dark;font-family:system-ui,sans-serif;background:#10151d;color:#e8edf5}body{max-width:1000px;margin:40px auto;padding:0 20px}h1{font-size:1.6rem}p{color:#aebbd0;line-height:1.7}.controls{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:24px 0}select,button{font:inherit;padding:10px 14px;border:1px solid #3d506c;border-radius:8px;background:#1a2638;color:inherit}select{max-width:100%}button{cursor:pointer}button.primary{background:#2563eb}button:disabled{opacity:.45;cursor:default}.screen{background:#000;border:1px solid #334155;border-radius:12px;overflow:hidden;aspect-ratio:16/9;display:grid;place-items:center}video{width:100%;height:100%;object-fit:contain}#status{min-height:1.7em}label{display:inline-flex;gap:8px;align-items:center}small{color:#94a3b8}
+</style>
+</head>
+<body>
+<h1>USBカメラビューア</h1>
+<p>カメラを接続し、「開始」を押してアクセスを許可してください。内蔵カメラが映る場合は、一覧からUSBカメラを選択します。</p>
+<div class="controls">
+<label>カメラ <select id="camera" aria-label="カメラ選択"><option value="">既定のカメラ</option></select></label>
+<button id="start" class="primary">開始</button>
+<button id="stop" disabled>停止</button>
+<label><input id="mirror" type="checkbox">左右反転</label>
+</div>
+<div class="screen"><video id="video" autoplay playsinline muted aria-label="カメラ映像"></video></div>
+<p id="status" role="status" aria-live="polite">停止中</p>
+<small>音声は取得しません。映像の録画・サーバーへの送信は行いません。HTTPS または http://localhost で開いてください。</small>
+<script>
+'use strict';
+const video = document.querySelector('#video');
+const camera = document.querySelector('#camera');
+const startButton = document.querySelector('#start');
+const stopButton = document.querySelector('#stop');
+const status = document.querySelector('#status');
+let stream = null;
+let busy = false;
+let generation = 0;
+function controls() {
+  startButton.disabled = busy || !!stream;
+  stopButton.disabled = !stream;
+  camera.disabled = busy;
+}
+function stopCamera(message = '停止中') {
+  generation++;
+  if (stream) stream.getTracks().forEach(track => track.stop());
+  stream = null;
+  video.srcObject = null;
+  status.textContent = message;
+  controls();
+}
+async function listCameras() {
+  const selected = stream?.getVideoTracks()[0]?.getSettings().deviceId || camera.value;
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  const inputs = devices.filter(device => device.kind === 'videoinput');
+  camera.replaceChildren(new Option('既定のカメラ', ''));
+  inputs.forEach((device, index) => camera.add(new Option(device.label || `カメラ ${index + 1}`, device.deviceId)));
+  if ([...camera.options].some(option => option.value === selected)) camera.value = selected;
+}
+async function startCamera() {
+  if (busy) return;
+  const deviceId = camera.value;
+  stopCamera('接続中…');
+  const current = generation;
+  busy = true;
+  controls();
+  try {
+    const next = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: {
+        ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
+        width: { ideal: 1280 }, height: { ideal: 720 }
+      }
+    });
+    if (current !== generation) { next.getTracks().forEach(track => track.stop()); return; }
+    stream = next;
+    video.srcObject = stream;
+    await video.play();
+    if (current !== generation) return;
+    const track = stream.getVideoTracks()[0];
+    const settings = track.getSettings();
+    status.textContent = `表示中：${track.label || 'カメラ'} / ${settings.width || '?'} × ${settings.height || '?'}`;
+    track.addEventListener('ended', () => {
+      if (stream === next) stopCamera('カメラが切断されました。接続を確認して再度開始してください。');
+    });
+    await listCameras().catch(() => {});
+  } catch (error) {
+    if (current !== generation) return;
+    const messages = {
+      NotAllowedError: 'カメラの使用が許可されていません。ブラウザのサイト設定を確認してください。',
+      NotFoundError: 'カメラが見つかりません。USB接続を確認してください。',
+      NotReadableError: 'カメラを開始できません。他のアプリが使用していないか確認してください。',
+      OverconstrainedError: '選択したカメラが利用できません。カメラを選び直してください。',
+      SecurityError: 'カメラへのアクセスが制限されています。HTTPS または localhost で開いてください。'
+    };
+    stopCamera(messages[error.name] || `エラー：${error.message}`);
+  } finally {
+    busy = false;
+    controls();
+  }
+}
+startButton.addEventListener('click', startCamera);
+stopButton.addEventListener('click', () => stopCamera());
+camera.addEventListener('change', () => { if (stream) startCamera(); });
+document.querySelector('#mirror').addEventListener('change', event => {
+  video.style.transform = event.target.checked ? 'scaleX(-1)' : '';
+});
+window.addEventListener('pagehide', () => stopCamera());
+if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
+  status.textContent = 'カメラAPIが利用できません。対応ブラウザで HTTPS または http://localhost から開いてください。';
+  startButton.disabled = true;
+  camera.disabled = true;
+} else {
+  listCameras().catch(() => {});
+  navigator.mediaDevices.addEventListener('devicechange', () => listCameras().catch(() => {}));
+}
+</script>
+</body>
+</html>

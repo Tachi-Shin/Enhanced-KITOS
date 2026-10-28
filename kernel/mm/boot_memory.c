@@ -27,7 +27,7 @@ struct node {
     unsigned int address_cells, size_cells;
     const uint8_t *reg;
     uint32_t reg_size;
-    bool reserved_root, reserved_child, chosen, disabled, children;
+    bool reserved_root, reserved_child, memory, chosen, disabled, children;
 };
 
 static uint32_t le32(const uint8_t *p)
@@ -48,6 +48,11 @@ int boot_memory_read_atags(const void *tags, size_t accessible, struct boot_memo
             if (words != 4) return -K_EINVAL;
             int rc = reserve(out, le32(b + pos + 8), le32(b + pos + 12));
             if (rc) return rc;
+        }
+        if (tag == 0x54410002U) { /* ATAG_MEM: size, start */
+            if (words != 4) return -K_EINVAL;
+            if (!le32(b + pos + 12) && le32(b + pos + 8))
+                out->ram = (struct memory_range){0, le32(b + pos + 8)};
         }
         pos += (size_t)words * 4;
     }
@@ -95,6 +100,8 @@ int boot_memory_read(const void *dtb, size_t accessible, struct boot_memory *out
             if (depth == 1) {
                 node.reserved_root = !strcmp((const char *)b + p, "reserved-memory");
                 node.chosen = !strcmp((const char *)b + p, "chosen");
+                node.memory = !strcmp((const char *)b + p, "memory") ||
+                              !strncmp((const char *)b + p, "memory@", 7);
                 if (node.reserved_root) {
                     node.address_cells = stack[0].address_cells;
                     node.size_cells = stack[0].size_cells;
@@ -108,14 +115,20 @@ int boot_memory_read(const void *dtb, size_t accessible, struct boot_memory *out
         } else if (token == 2) { /* FDT_END_NODE */
             if (!depth) return -K_EINVAL;
             struct node *node = &stack[depth - 1];
-            if (node->reserved_child && !node->disabled && node->reg) {
+            if ((node->reserved_child || node->memory) && !node->disabled && node->reg) {
                 struct node *parent = &stack[depth - 2];
                 unsigned int a = parent->address_cells, s = parent->size_cells;
                 if ((a != 1 && a != 2) || (s != 1 && s != 2) ||
                     !node->reg_size || node->reg_size % (4U * (a + s))) return -K_EINVAL;
                 for (uint32_t offset = 0; offset < node->reg_size; offset += 4U * (a + s)) {
-                    int rc = reserve(out, cells(node->reg + offset, a), cells(node->reg + offset + 4U * a, s));
-                    if (rc) return rc;
+                    uint64_t base = cells(node->reg + offset, a), size = cells(node->reg + offset + 4U * a, s);
+                    if (size > ~0ULL - base) return -K_EINVAL;
+                    if (node->memory) {
+                        if (!base && size) out->ram = (struct memory_range){base, size};
+                    } else {
+                        int rc = reserve(out, base, size);
+                        if (rc) return rc;
+                    }
                 }
             }
             if (!--depth) root_closed = true;
@@ -136,7 +149,7 @@ int boot_memory_read(const void *dtb, size_t accessible, struct boot_memory *out
                 if (strcmp((const char *)b + p, "okay") && strcmp((const char *)b + p, "ok")) node->disabled = true;
             } else if (node->reserved_root && !strcmp(name, "ranges")) {
                 if (size) return -K_ENOTSUP; /* Only physical, untranslated reservations. */
-            } else if (node->reserved_child && !strcmp(name, "reg")) {
+            } else if ((node->reserved_child || node->memory) && !strcmp(name, "reg")) {
                 if (node->reg) return -K_EINVAL;
                 node->reg = b + p; node->reg_size = size;
             } else if (node->chosen && (!strcmp(name, "linux,initrd-start") || !strcmp(name, "linux,initrd-end"))) {

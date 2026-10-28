@@ -1,0 +1,110 @@
+Historical ABI 2 / USB 2 milestone. ABI 3 and SuperSpeed were added afterward;
+see usb-superspeed-validation.txt and usb-superspeed.md for the current state.
+
+Enhanced KITOS USB Mass Storage / FAT12/16/32 / exFAT validation
+2026-10-28 (Asia/Tokyo)
+
+Scope:
+  Preserve earlier Phase 0-3, DWC2/HID, PCIe/xHCI and C module working-tree work.
+  Add loadable C STORAGE.EKM, USB 2 bulk, BOT/SCSI block I/O, removable device
+  lifetime management, automatic VFS mounts, and FAT-family/exFAT read/write.
+  ABI advanced to 2 because host ops, block objects and the SDK table changed.
+  No physical USB/SD device or existing user disk image was used or modified.
+  No commit/reset/checkout/clean performed.
+
+Environment:
+  macOS arm64, Apple clang 21, AArch64 GCC 15.2, QEMU 10.2.2, Python 3.
+  QEMU: /Users/shingo/qemu-10.2.2/bin/qemu-system-aarch64
+  FatFs R0.16 vendored with upstream notices and documented local adaptations.
+  mtools formats FAT12/16/32; independently built exfat-utils 1.4.0 formats/checks
+  exFAT. The GPL exfat-utils binaries are host-only ignored build dependencies;
+  they are not linked into the kernel or the driver modules.
+
+Builds — PASS (-Wall -Wextra -Werror):
+  make TARGET=qemu -j4
+  make TARGET=hardware -j4
+  make users drivers
+  make drivers-native
+  HID.EKM, PI4USB.EKM, STORAGE.EKM, HELLO.EKM cross-built with driver ABI 2.
+
+Host regression — PASS (make test):
+  All prior block/FAT32/VFS/timer/SD/SDHCI/page/boot-memory/ELF/USB suites.
+  FAT-family VFS: 66782 checks, ASan/UBSan, non-recovering.
+    Independently formatted FAT12/16/32 and exFAT; exFAT 4K logical sectors,
+    primary MBR and GPT; UTF-8/Japanese/astral names, multi-cluster data,
+    read/write/append offsets, zero-filled extension, shrink/grow, rename/list,
+    directory cycle rejection including case aliases, remount persistence,
+    LFN allocation failure, read-only and cached-metadata offline handling.
+    Open VFS handles pin old media; close/unmount releases its reference.
+  BOT/SCSI mock: 84 checks, ASan/UBSan, non-recovering.
+    CBW byte layout, Capacity16 and >32-bit LBA READ16/WRITE16, cache sync,
+    CSW tag failure/reset/clear-halt and subsequent recovery, SCSI write-protect,
+    medium-change ENODEV, mounted-module pin and retryable partial unload.
+  Module ELF validator: 193165 checks across all four actual .EKM artifacts.
+
+EKITOS raspi4b + STORAGE.EKM + real QEMU USB storage — PASS:
+  python3 tools/storage_qemu_test.py --qemu <QEMU> --kernel build/rpi4/qemu/kernel8.img
+  Seven media layouts: FAT12, FAT16, FAT32, exFAT, exFAT/4096 logical blocks,
+    exFAT/MBR and exFAT/GPT. Enumeration, SCSI readiness/capacity, bulk read/write,
+    automatic mount, Unicode long names, mkdir/append/rename/truncate/readback,
+    explicit unmount/remount persistence, EBUSY mounted module pin and unload.
+  Filesystem integrity checked read-only with fsck_msdos/exfatfsck where available.
+    exFAT surviving files have valid timestamps and pass the independent checker.
+  USB hub with two disks and a read-only disk: separate mounts and EROFS.
+  An EL0 Newlib program holds a real USB FD across QMP physical-device removal:
+    [user-usb] unplug/ENODEV/close PASS
+    The process closes the old FD, exits 0, old mount disappears, physical page
+    count returns to baseline. Replug reuses the slot and preserves file data.
+  Removing the entire hub reclaims its descendants; memtest/selftest pass.
+  One usb-bot interface with LUN 0 and LUN 1 exposes two independent disks;
+    writing distinct data to each does not alias the other LUN.
+
+Native production xHCI + MSC + FAT/exFAT + QEMU PCI model — PASS:
+  python3 tools/storage_xhci_test.py --qemu <QEMU>
+  The same production C sources execute on this PC via injected MMIO/DMA SDK.
+  qemu-xhci with p3=0 selects the implemented USB 2 path, real usb-storage model.
+  BOT/SCSI -> exFAT Unicode file, 17011-byte multi-block write/read and flush.
+  Reboot into a read-only virtual device, verify persisted bytes and EROFS.
+  Mounted block objects prevent module unload; unplug/Disable Slot/stop/fini
+    releases all controller-owned DMA pages.
+  This does not emulate BCM2711 PCIe or run the EKITOS kernel on virt.
+
+exFAT files above 4 GiB — PASS:
+  make test-exfat-large QEMU=<QEMU>
+  Independent exfat-utils formats a sparse 8 GiB volume. A spec-based fixture
+    injects a valid contiguous file >4 GiB without allocating/writing 4 GiB data.
+  Host VFS seeks to 0x100000011, reads and updates data, remounts and verifies it.
+  EKITOS Newlib off_t/lseek/read/write traverse the real USB storage stack:
+    [user-usb] exFAT seek/read/write above 4GiB PASS
+  Independent exfatfsck reports no errors before and after EKITOS writes.
+
+Regression — PASS:
+  xhci_qtest.py: HID input, short controls, endpoint STALL recovery, hub routing,
+    command/event/transfer ring wrap, allocation rollback, timeout, failed halt
+    DMA retention and eventual reclamation.
+  module_qemu_test.py: ABI/malformed/duplicate rejection, 8-module pool limit,
+    rollback, out-of-order unload and HID reload with existing keyboard.
+  usb_qemu_test.py: HID.EKM + console/EL0 input, hubs, hotplug, held-key release.
+  qemu_test.py: UART/IRQ/tasks, SD/VFS/reboot persistence, no media, MMU/EL0,
+    DTB/OOM rollback, ELF/Newlib/process/FP and prior Phase 3 boundary checks.
+  Python bytecode compilation, documentation local links and git diff --check.
+
+Logs (ignored build artifacts):
+  build/tests/storage-build.txt, storage-hardware-build.txt
+  build/tests/storage-driver-build.txt, storage-native-build.txt
+  build/tests/storage-regression-host.txt, msc-host.txt
+  build/tests/storage-qemu.txt, storage-qemu-transcript.txt
+  build/tests/storage-xhci.txt, xhci-current.txt
+  build/tests/exfat-large.txt, exfat-large-transcript.txt
+  build/tests/modules-current.txt, modules-qemu-transcript.txt
+  build/tests/storage-hid-qemu.txt, usb-qemu-transcript.txt
+  build/tests/storage-regression-qemu.txt, qemu-transcript.txt
+
+Practical limits:
+  Physical Pi 4/VL805 and real storage bridges are unverified. SuperSpeed/UAS,
+    CBI/UFI/CD-ROM, encrypted/TexFAT and all other USB classes remain unsupported.
+  A USB 3 storage device must use a USB 2 path and expose BOT/SCSI.
+  No filesystem repair/format command, RTC, journaling or power-loss atomicity.
+  Fixed pools; first compatible partition only; rename does not replace an
+    existing destination. Existing SD root FAT32 selection remains unchanged.
+  See docs/usb-storage.md and sdk/README.md for installation and ABI 2 updates.

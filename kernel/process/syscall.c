@@ -48,6 +48,9 @@ int64_t process_syscall(uint64_t number, const uint64_t a[6])
 {
     struct process *p = task_current_process();
     if (!p) return -K_EINVAL;
+    if (number == KITOS_SYS_CONTROL) {
+        process_pin(); int64_t result=process_control(a); process_unpin(); return result;
+    }
     if (number == KITOS_SYS_WAITPID) {
         if ((a[0] > 0x7FFFFFFF && a[0] != ~0ULL) || a[2] > 1) return -K_EINVAL;
         if (a[1] && vm_user_check(task_current_space(), a[1], sizeof(int), VM_WRITE)) return -K_EFAULT;
@@ -55,6 +58,18 @@ int64_t process_syscall(uint64_t number, const uint64_t a[6])
         int rc = process_wait(a[0] == ~0ULL ? 0 : (uint32_t)a[0], &status, a[2] != 0);
         if (rc > 0 && a[1] && copy_to_user(task_current_space(), a[1], &status, sizeof(status))) return -K_EFAULT;
         return rc;
+    }
+    if(number==KITOS_SYS_SPAWN_EX){
+        struct kitos_spawn_spec spec;struct kitos_fd_map maps[PROCESS_FD_MAX];
+        if(copy_from_user(task_current_space(),&spec,a[0],sizeof(spec)))return -K_EFAULT;
+        if(spec.flags||spec.map_count>PROCESS_FD_MAX)return -K_EINVAL;
+        if(spec.map_count&&copy_from_user(task_current_space(),maps,spec.maps,spec.map_count*sizeof(maps[0])))return -K_EFAULT;
+        char path[VFS_PATH_MAX];struct launch_arguments launch={0};unsigned int argc,envc;
+        int rc=process_user_path(spec.path,path,sizeof(path));
+        if(!rc)rc=user_vector(spec.argv,launch.args,&argc,&launch);
+        if(!rc)rc=user_vector(spec.envp,launch.env,&envc,&launch);
+        if(rc)return rc;
+        return process_spawn_mapped(path,argc,launch.args,envc,launch.env,maps,spec.map_count);
     }
     if (number == KITOS_SYS_SPAWN) {
         char path[VFS_PATH_MAX]; struct launch_arguments launch = {0};
@@ -72,7 +87,9 @@ int64_t process_syscall(uint64_t number, const uint64_t a[6])
         return process_kill_child((uint32_t)a[0], a[1] == 9);
     }
     process_pin();
-    int64_t result = number == KITOS_SYS_BRK ? heap_break(p, a[0]) : process_fd_call(p, number, a);
+    int64_t result = number >= KITOS_SYS_READDIR && number <= KITOS_SYS_GETCWD ? process_fs_call(p,number,a) :
+        number>=KITOS_SYS_PIPE&&number<=KITOS_SYS_DISPLAY?process_ipc_call(p,number,a):
+        number == KITOS_SYS_BRK ? heap_break(p, a[0]) : process_fd_call(p, number, a);
     process_unpin();
     return result;
 }

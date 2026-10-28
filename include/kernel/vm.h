@@ -14,6 +14,9 @@ void vm_space_destroy(struct vm_space *space);
 int vm_map_new(struct vm_space *space, uint64_t address, unsigned int permissions,
                const void *initial, size_t length);
 int vm_unmap(struct vm_space *space, uint64_t address);
+/* Borrowed pages remain owned by the IPC object; unmap/destroy only remove
+ * translations. Mapping lifetime must hold an IPC reference. Never executable. */
+int vm_map_shared(struct vm_space *,uint64_t address,uint64_t physical,bool writable);
 int vm_query(const struct vm_space *space, uint64_t address, struct vm_mapping *out);
 /* Scheduler-only: IRQ masked, switch before changing the kernel context. */
 void vm_activate(const struct vm_space *space);

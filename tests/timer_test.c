@@ -5,11 +5,16 @@
 #include <dos/config.h>
 #define CHECK(x) do { ++checks; if (!(x)) { fprintf(stderr, "timer line %d: %s\n", __LINE__, #x); exit(1); } } while (0)
 static unsigned int checks, fired, requested;
-static uint64_t now, programmed;
+static uint64_t now, programmed, arm_delay;
 extern uint64_t test_irq_mask;
 uint64_t clock_now(void) { return now; }
 uint64_t clock_frequency(void) { return 1000000; }
-uint64_t clock_after_ms(uint32_t ms) { return now + (uint64_t)ms * 1000; }
+uint64_t clock_after_ms(uint32_t ms)
+{
+    uint64_t deadline = now + (uint64_t)ms * 1000;
+    now += arm_delay; arm_delay = 0;
+    return deadline;
+}
 void arch_timer_program(uint64_t deadline) { programmed = deadline; }
 bool sched_quantum_expired(void) { ++requested; return true; }
 static void callback(void *arg) { CHECK(test_irq_mask == 128); fired = fired * 10 + (unsigned int)(uintptr_t)arg; }
@@ -57,5 +62,11 @@ int main(void)
     now = 499; kernel_timer_expire(now); CHECK(!a.armed && fired == 23567);
     test_irq_mask = 128; CHECK(kernel_timer_arm(&a, 1, callback, NULL) == 0);
     CHECK(test_irq_mask == 128 && kernel_timer_cancel(&a) && test_irq_mask == 128);
+    test_irq_mask = 0; now = 2000000; arm_delay = 100000;
+    unsigned int late = 0;
+    CHECK(kernel_timer_arm(&a, 1, count, &late) == 0);
+    CHECK(a.armed && !late && programmed > now && test_irq_mask == 0);
+    kernel_timer_expire(now); CHECK(late == 1 && !a.armed);
+    CHECK(kernel_timer_arm_at(&a, now, count, &late) < 0 && !a.armed);
     printf("timer deadlines/cancel/rearm/budget/wrap: PASS (%u checks)\n", checks);
 }

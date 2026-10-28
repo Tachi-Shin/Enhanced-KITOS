@@ -16,6 +16,15 @@ int irq_register(unsigned int id, irq_handler handler, void *context)
     arch_irq_restore(flags);
     return 0;
 }
+int irq_unregister(unsigned int id, irq_handler handler, void *context)
+{
+    if(id>=IRQ_COUNT||!handler)return -K_EINVAL;
+    uint64_t flags=arch_irq_save();
+    if(handlers[id].handler!=handler||handlers[id].context!=context){arch_irq_restore(flags);return -K_ENOENT;}
+    irq_controller_disable(id);
+    handlers[id].handler=NULL;handlers[id].context=NULL;
+    arch_irq_restore(flags);return 0;
+}
 void irq_dispatch(void)
 {
     uint32_t id;

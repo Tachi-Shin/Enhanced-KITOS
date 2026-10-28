@@ -1,5 +1,7 @@
 # Enhanced KITOS Phase 1 / Phase 2
 
+この文書と`phase1-2-validation.txt`はPhase 1・2完了時点の記録です。現在はPhase 3のELF/Newlib・プロセス管理・FP/SIMD保存も実装されており、現状は [Phase 3](phase3.md) と [引継ぎ記録](recovery-2026-10-27.md) を参照してください。
+
 2026-10-27。ユーザー確認済みの「TTBR1の上位共通カーネル＋TTBR0のタスク固有ユーザー空間」を実装。
 物理ロード位置は従来の`0x80000`を維持します。標準Cライブラリは**Newlib**を採用する方針です。
 本段階はメモリ保護とEL0/syscall基盤までで、ELF64ロード・一般のプロセス管理・NewlibのリンクはPhase 3です。

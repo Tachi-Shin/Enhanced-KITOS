@@ -1,0 +1,128 @@
+Enhanced KITOS module-based boot / Unix root / ELF shell validation
+2026-10-28 (Asia/Tokyo)
+
+Scope:
+  Preserve the earlier uncommitted Phase 0-3, USB 2/3, BOT/SCSI and FAT/exFAT work.
+  Move existing hardware backends into .EKM files; add Unix directories on FAT32,
+  an EL0 /bin/sh, ELF utilities in /bin and /sbin, and /media/usbN automounts.
+  No physical device, existing user disk image, or Git history was modified.
+  No reset, checkout, clean or commit. Former monitor code retained as the
+  explicitly labelled recovery shell in kernel/shell/rescue.c.
+
+Environment:
+  macOS arm64; Apple clang 21; AArch64 GCC 15.2; Python 3; QEMU 10.2.2.
+  QEMU executable: /Users/shingo/qemu-10.2.2/bin/qemu-system-aarch64
+  Disposable FAT/exFAT media formatted by mtools / exfat-utils 1.4.0.
+
+Builds -- PASS (-Wall -Wextra -Werror):
+  make TARGET=qemu -j4
+  make TARGET=hardware -j4
+  make drivers-native
+  make build/host/xhci.so build/host/xhci_storage.so
+  make build/drivers/IRQTEST.EKM
+  Normal make also builds users, all drivers and build/rootfs/.
+  Rootfs has 44 actual AArch64 ELF64 ET_EXEC files: /bin/sh, 42 utility files,
+    and /sbin/unix-probe. Utilities share a C implementation but are individual
+    executable files and execute as separate EL0 processes.
+  All 11 .EKM artifacts cross-built and built as native shared libraries:
+    TIMER GIC GPIO MAILBOX UART SD DWC2 PI4USB HID STORAGE HELLO.
+  The first six boot modules are embedded as exact read-only ELF resources,
+    validated, mapped W^X and relocated by the same loader used for files.
+  Driver ABI 4, maximum 32 modules, owner-tracked MMIO/DMA/IRQ/device services.
+
+Host regression -- PASS (make test):
+  Driver ELF validation/loading/mutation/rollback for all 11 actual modules:
+    492443 checks, ASan/UBSan, non-recovering.
+  DTB/ATAG reservations and low RAM discovery: 25317 checks, ASan/UBSan.
+  Existing VFS/FAT32: 7321 checks per tested sector geometry.
+  FAT12/16/32/exFAT: 66782 checks, ASan/UBSan, non-recovering.
+  SuperSpeed descriptors/protocol/shared enumeration/hub controls: 664 checks.
+  USB descriptor/Boot HID: 363 checks; BOT/SCSI: 84 checks.
+  BCM2711 PCIe: 1414 checks; SDHCI: 1873; SD: 1031; timer: 83;
+    pages: 2636; ELF validation/load: 21347.
+
+Unix system integration -- PASS (tools/unix_qemu_test.py):
+  Production hardware symbols (SD/SDHCI, GPIO backend, PL011/mini UART,
+    GIC implementation, DWC2, HID report decode) absent from linked kernel.
+  Real .EKM-backed UART, GIC, timer, GPIO, firmware, SD and USB boot on raspi4b.
+  lsmod reports nine loaded modules, ABI 4. Active central services and mounted
+    SD refuse unload with EBUSY.
+  Test module exercises real MAILBOX.EKM DMA and QEMU firmware clock-property
+    requests, including buffer reuse. QEMU acknowledges SET_CLOCK_RATE without
+    modelling a changed hardware clock; this is request/response validation.
+  IRQ owner/callback/priority/number validation, occupied timer IRQ rejection,
+    duplicate registration, disable/unregister and three load/unload cycles.
+  Clean FAT32 root with Unix directory tree, actual ELF headers inspected.
+  Real /bin/sh at EL0. Moving /bin/echo away makes echo unavailable; restoring
+    the ELF restores the command. No normal-mode kernel builtin fallback.
+  PATH restriction and explicit /bin paths, quoting, environment expansion,
+    literal single quotes, $? after true/false, sh -c, NO_COLOR and ANSI colors.
+  Relative I/O, canonical cwd, parent cwd inheritance / child cwd isolation.
+  cp and case/dot alias same-file rejection, malformed ELF rejection.
+  User probes exercise readdir/create/rename/truncate/chdir/getcwd, bad pointers,
+    invalid control operation and FD errors. Repeated utilities reclaim pages.
+  Kernel diagnostics run in a protected kernel worker through typed syscalls.
+  Missing /bin/sh and no-media boot enter the labelled recovery shell; module-
+    provided UART and timer continue working.
+
+Other kernel regression -- PASS on the final modular kernel:
+  tools/qemu_test.py:
+    UART/IRQ/tasks, SD/VFS/reboot persistence, no media, MMU/EL0/DTB/OOM,
+    ELF/Newlib/process/FP, argv/envp/FD/task limits and resource reclamation.
+  tools/module_qemu_test.py:
+    Malformed/ABI/duplicate rejection, repeated load/unload, actual 32-module
+    pool saturation, out-of-order unload, page rollback and HID reload.
+  tools/usb_qemu_test.py:
+    DWC2.EKM + HID.EKM, keyboard/mouse/console/EL0 input, hubs, hotplug and reuse.
+  tools/storage_qemu_test.py:
+    STORAGE.EKM, seven FAT/exFAT layouts including 4096-byte sectors and MBR/GPT;
+    Unicode, RW/rename/truncate/remount; /media/usbN entries listed under /media
+    without leaking leaf entries into root; hubs/two disks/RO media; real EL0
+    open-FD unplug/replug/ENODEV; two LUNs behind one BOT interface.
+  tools/test_large_exfat.py:
+    Real EL0 USB I/O at offset 0x100000011 and independent exfatfsck checks.
+
+Native production xHCI + QEMU real USB model regression -- PASS with ABI 4:
+  tools/xhci_qtest.py: HID/control/STALL/hubs/ring wrap/DMA timeout safety.
+  tools/storage_xhci_test.py --super:
+    SuperSpeed Slot Speed ID=4, EP0=512, bulk MPS=1024/MaxBurst=15; mixed USB 2
+    HID; exFAT RW; bad-CSW reset recovery; unplug/replug and active-I/O removal;
+    another keyboard remains live; persisted read-only media and DMA reclamation.
+  tools/storage_xhci_test.py (USB 2): BOT/exFAT RW/persistence/RO/module lifetime.
+  These native tests run the same C sources against virt PCI MMIO/DMA; they do
+    not run an EKITOS virt kernel or emulate BCM2711 PCIe/VL805 firmware.
+
+Packaging checks -- PASS:
+  New disposable system-image creation includes Unix tree, ELFs and modules.
+  Invoking run_image.py again leaves an existing image byte-for-byte unchanged
+    (SHA-256 compared before/after).
+  Regenerating a rootfs tree preserves an existing etc/profile.
+  All 44 packaged program files have ELF magic; all 11 module files present.
+  Python bytecode compilation; updated documentation local links; git diff --check.
+
+Logs (ignored build artifacts):
+  build/tests/unix-host-tests.txt
+  build/tests/unix-qemu-build.txt, unix-hardware-build.txt
+  build/tests/unix-native-drivers.txt, unix-native-xhci.txt, unix-irq-build.txt
+  build/tests/unix-shell-qemu.txt, unix-shell-transcript.txt
+  build/tests/unix-qemu.txt, qemu-transcript.txt
+  build/tests/unix-modules-qemu.txt, modules-qemu-transcript.txt
+  build/tests/unix-usb-qemu.txt, usb-qemu-transcript.txt
+  build/tests/unix-storage-qemu.txt, storage-qemu-transcript.txt
+  build/tests/unix-exfat-large.txt, exfat-large-transcript.txt
+  build/tests/unix-xhci.txt, unix-superspeed.txt, unix-xhci-storage.txt
+
+Practical limits:
+  No physical Pi 4 testing. Hardware build and QEMU validation are separate.
+  Central boot-service modules remain pinned until reboot; updating their
+    embedded resources requires rebuilding/replacing kernel8.img.
+  Native TIMER/GPIO libraries containing EL1 instructions were build-checked;
+    their execution was tested inside EKITOS/QEMU, not a macOS user process.
+  Filesystem remains FAT32, without Unix permissions/UIDs/symlinks/hardlinks.
+    /dev and /proc are reserved directories, not implemented devfs/procfs.
+  Single-user system; administration syscalls have no UID/capability checks.
+  Shell lacks pipelines, redirection, job control, globbing and general scripts.
+    cd/export/unset/exit and process-management builtins remain in the shell.
+  Existing USB class limits remain: Boot HID and BOT/SCSI storage; no UAS,
+    SuperSpeedPlus, isochronous or all-device compatibility claim.
+  See unix-system.md, ../sdk/README.md and usb-superspeed.md.

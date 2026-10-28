@@ -1,0 +1,45 @@
+Enhanced KITOS Tab completion distribution regression
+Date: 2026-10-28 JST
+
+Cause
+  build/tests/system.img retained an old /bin/sh (594712 bytes).
+  SHA-256: 9cc0f53bb412ee526286fa25759d7acda7646d13b8df924946e8f317b04ba5be
+  It had no sh_edit_read symbol, history text, history file path or OSC 133 marker.
+  The built shell had the editor but run_image.py deliberately left existing
+  images unchanged. Fresh-image tests masked this distribution discrepancy.
+
+Change
+  Add explicit make update-system-image / run_image.py --update.
+  Back up the entire existing image before updating managed files. Preserve
+  /etc, history, user data and custom command files. Do not format/recreate it.
+  Existing-image startup reports when /bin/sh differs from the current build.
+  sh --version and the startup banner identify history/Tab support.
+  terminal_qemu_test --image tests a copy without restaging its executables.
+
+Validation
+  python3 tools/image_update_test.py                         PASS
+    Complete backup is byte-identical to the prior image.
+    Old sh updated, /etc/profile, history, HELLO.TXT and custom command preserved.
+    Non-update invocation leaves even a custom-shell image byte-identical.
+  make users drivers                                        PASS
+  make TARGET=hardware -j4                                   PASS
+  python3 tools/run_image.py --update build/tests/system.img  PASS
+    Backup: build/tests/system.img.before-update-yq90g7pw.bak
+    /bin/sh read back from system.img matches build/usr/bin/sh exactly.
+  tools/terminal_qemu_test.py --image build/tests/system.img
+    --kernel build/rpi4/qemu/kernel8.img                      PASS
+    Existing-image copy, no executable restaging:
+      --version, ec<Tab>, e<Tab> candidate list, escaped-space filename,
+      directory completion, UART and real emulated USB keyboard Tab,
+      history across reboot and exact 6x8 framebuffer pixels.
+    Candidate screenshot captured before Enter and visually inspected.
+  git diff --check                                          PASS
+
+Evidence: build/tests/tab-image-update-test.txt, tab-system-image-update.txt,
+  tab-users-build.txt, tab-hardware-build.txt, tab-updated-image-qemu.txt,
+  terminal-qemu-transcript.txt, tab-candidates-screen.png.
+
+Distribution: updated build/tests/system.img and
+  build/deploy/ekitos-tab-shell-update.zip (copy bin/sh onto root FAT32 /bin/sh).
+  Physical Pi confirmation of the new shell is pending. This verifies completion
+  and candidates on Tab; ghost text while typing is not part of this change.

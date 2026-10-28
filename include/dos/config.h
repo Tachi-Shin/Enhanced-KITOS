@@ -5,7 +5,7 @@
 #define TIMER_INTERVAL_MS 10U
 
 /* シェルを含めた通常タスク数。内部idleタスクは含まない。 */
-#define MAX_TASKS        8U
+#define MAX_TASKS        32U
 #define TASK_STACK_SIZE (64U * 1024U)
 
 #define TASK_UNUSED     0

@@ -30,16 +30,9 @@ bool kernel_timer_pending(const struct timer_event *event)
     arch_irq_restore(flags);
     return armed;
 }
-int kernel_timer_arm_at(struct timer_event *event, uint64_t deadline,
-                        void (*callback)(void *), void *argument)
+static void arm_locked(struct timer_event *event, uint64_t deadline,
+                       void (*callback)(void *), void *argument)
 {
-    if (!event || !callback) return -K_EINVAL;
-    uint64_t flags = arch_irq_save();
-    /* Future deadlines must be within half the counter range. */
-    if ((int64_t)(deadline - clock_now()) <= 0) {
-        arch_irq_restore(flags);
-        return -K_EINVAL;
-    }
     cancel_locked(event);
     event->deadline = deadline;
     event->callback = callback;
@@ -50,17 +43,32 @@ int kernel_timer_arm_at(struct timer_event *event, uint64_t deadline,
     *link = event;
     event->armed = true;
     kernel_time_reprogram();
+}
+int kernel_timer_arm_at(struct timer_event *event, uint64_t deadline,
+                        void (*callback)(void *), void *argument)
+{
+    if (!event || !callback) return -K_EINVAL;
+    uint64_t flags = arch_irq_save();
+    /* Future deadlines must be within half the counter range. */
+    if ((int64_t)(deadline - clock_now()) <= 0) {
+        arch_irq_restore(flags);
+        return -K_EINVAL;
+    }
+    arm_locked(event, deadline, callback, argument);
     arch_irq_restore(flags);
     return 0;
 }
 int kernel_timer_arm(struct timer_event *event, uint32_t ms,
                      void (*callback)(void *), void *argument)
 {
-    if (!ms) return -K_EINVAL;
+    if (!event || !callback || !ms) return -K_EINVAL;
     uint64_t flags = arch_irq_save();
-    int rc = kernel_timer_arm_at(event, clock_after_ms(ms), callback, argument);
+    /* A positive relative timeout can elapse before it is queued (e.g. a
+     * descheduled QEMU vCPU). Queue it as due instead of rejecting sleep.
+     * The IRQ runs its callback after the caller has entered SLEEPING. */
+    arm_locked(event, clock_after_ms(ms), callback, argument);
     arch_irq_restore(flags);
-    return rc;
+    return 0;
 }
 void kernel_timer_expire(uint64_t now)
 {

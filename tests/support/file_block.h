@@ -22,7 +22,7 @@ static int disk_write(struct block_device *device, uint64_t lba, uint32_t count,
     size_t bytes = (size_t)count * device->block_size;
     return pwrite(c->fd, buffer, bytes, (off_t)(lba * device->block_size)) == (ssize_t)bytes ? 0 : -5;
 }
-static const struct block_device_ops disk_ops = {disk_init, disk_read, disk_write};
+static const struct block_device_ops disk_ops = {.init=disk_init, .read=disk_read, .write=disk_write};
 static int disk_open(const char *path, struct block_device *device, struct file_context *context)
 {
     struct stat st;

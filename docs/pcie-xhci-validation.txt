@@ -1,0 +1,97 @@
+Enhanced KITOS PCIe/xHCI and C driver module validation
+2026-10-27 (Asia/Tokyo)
+
+Scope:
+  Preserve the previous Phase 0-3 and DWC2/HID working-tree changes.
+  Add BCM2711 PCIe/VL805 xHCI and PC-developed loadable C drivers.
+  Native EKITOS C compiler deferred as explicitly requested by the user.
+  No physical Pi/USB device or existing user SD image used. No commits created.
+
+Environment:
+  macOS arm64, Apple clang 21, aarch64-elf GCC 15.2, QEMU 10.2.2, Python 3.
+  QEMU path: /Users/shingo/qemu-10.2.2/bin/qemu-system-aarch64
+  Qtest stdio + QMP FIFO on virt; QMP stdio + UART FIFO on raspi4b.
+
+Builds — PASS (-Wall -Wextra -Werror):
+  make TARGET=hardware -j4
+  make TARGET=qemu all
+  make drivers
+  make drivers-native
+  Hardware kernel image and independent HID.EKM, PI4USB.EKM, HELLO.EKM.
+  Native shared libraries compile from the same production C sources.
+  PI4USB ELF64 ET_DYN has only R_AARCH64_RELATIVE relocations, no imported libc.
+
+Host checks — PASS (make test):
+  Previous block, FAT32/VFS, timer, SD/SDHCI, page, boot-memory, ELF and USB suites.
+  BCM2711 PCIe mock: 1414 checks.
+    Reset/link wait and timeout; CPU/PCI/DMA windows; BAR probe/programming;
+    firmware call BDF/order/failure; wrong device; oversized BAR; capability loop.
+  Module ELF: 138290 checks, ASan/UBSan, non-recovering.
+    Actual three .EKM artifacts; segment permissions, zero-fill/page boundaries,
+    relative relocation targets/addends, every header bit mutation, truncation,
+    bounded reads and page-allocation failure injection.
+
+Native production xHCI + QEMU PCI model — PASS (make test-xhci-qemu):
+  Real qemu-xhci, USB keyboard and mouse, root-port discovery/reset;
+    Enable Slot, Address Device, EP0 MaxPacket, descriptors, Set Configuration,
+    Configure Endpoint and HID Set Protocol.
+  Pending interrupt IN survives NAK; QMP key 'a' -> USB keyboard report usage 4.
+  QMP relative mouse +7,-5 and left button -> report [1,7,251].
+  Short 64-byte GET_DESCRIPTOR returns the actual 18 bytes.
+  Invalid request STALL -> Reset Endpoint/Set Dequeue -> next descriptor succeeds.
+  180 control requests wrap the EP0 transfer ring without recreating its slot.
+  External full-speed USB hub and keyboard enumerate through route string.
+  130 release/re-enumeration cycles wrap command/event rings and reuse slots.
+  Device hot-unplug, Disable Slot, halt and complete DMA reclamation.
+  Allocation failure during controller start releases the allocated prefix.
+  Dropped command doorbell produces a bounded timeout, halts DMA before freeing.
+  Simulated failed halt retains all DMA; later confirmed halt releases it.
+  Driver runs on the PC with injected SDK MMIO/DMA callbacks. This is not a
+    port of the EKITOS kernel to virt and does not emulate BCM2711 PCIe.
+
+EKITOS AArch64 module integration — PASS (make test-modules-qemu):
+  Autoload HID.EKM; real USB keyboard uses the module's C code.
+  Invalid magic, architecture, ABI, non-executable init and truncation refused.
+  PI4USB.EKM refuses the QEMU platform before touching Pi hardware registers.
+  Repeated HELLO load/unload; duplicate names refused without leaking pages.
+  Eight-module pool limit, ENOSPC rollback, out-of-order unload and full recovery.
+  HID unload synthesizes held-Shift release; interface becomes unbound.
+  Reload binds the existing device; USB keyboard types and executes 'echo reload'.
+  Physical page count returns to baseline; memtest passes.
+
+EKITOS USB end-to-end — PASS (make test-usb-qemu):
+  Test image stages HID.EKM; DWC2 -> module HID -> console and EL0 input syscall.
+  Keyboard, mouse, hubs/nested hubs, hotplug, held-key release, frame reuse,
+    unsupported tablet, root devices, memtest and scheduler regression.
+
+Full EKITOS QEMU regression — PASS (make test-qemu):
+  UART/IRQ/tasks, SD/VFS, reboot persistence, read-only external FAT checker,
+    no-media boot, MMU/EL0 isolation, DTB reservations, small-memory/OOM rollback,
+    ELF/Newlib/process/FP and previous Phase 3 boundary checks.
+  No compiler errors or ASan/UBSan diagnostics in the final validation run.
+  git diff --check and Python bytecode compilation pass.
+
+Final logs (ignored build artifacts):
+  build/tests/hardware-build.txt
+  build/tests/drivers-native.txt
+  build/tests/full-host-tests.txt
+  build/tests/xhci-qtest.txt
+  build/tests/modules-qemu.txt, modules-qemu-transcript.txt
+  build/tests/usb-current.txt, usb-qemu-transcript.txt
+  build/tests/regression-current.txt, qemu-transcript.txt
+
+Artifacts SHA-256:
+  HID.EKM:    3b8563d63f854f8ce096640a786b8bdbfc3e6869f0697667b504450e2df7b3cb
+  PI4USB.EKM: cd8ace9b9f73d8fddeba0fa986a4d03866134cacd40de44fe8205f2ffc903db9
+  HELLO.EKM:  5dfb187751b2cf955ba0b465c4fdd57772913b9bc487088645ffcf04dca290a6
+  hardware kernel8.img:
+    3ba370bb776c952176eeb67d533e096c20edef41f64fde1db88d38aac112c0c0
+
+Not verified / remaining:
+  Physical Pi 4 PCIe link, VL805 firmware handoff, real DMA/cache behavior,
+    real Low-speed devices and High-speed-hub transaction translators.
+  SuperSpeed, bulk/isochronous and storage/network/audio/video classes.
+  Generic Report HID/NKRO/JIS/IME/LED output and graphical mouse cursor.
+  Native EKITOS compiler, Linux .ko binary compatibility, module isolation,
+    signing and arbitrary IRQ driver services are not part of ABI v1.
+  Installation and physical validation steps: sdk/README.md, docs/pcie-xhci.md.

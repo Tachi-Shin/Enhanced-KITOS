@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+import re
 from test_images import create
 from boot_fixture import create_dtb
 import process_test
@@ -29,12 +30,16 @@ class Machine:
                 chunk = key.fileobj.read1(8192)
                 if not chunk: raise RuntimeError('QEMU exited: ' + data.decode(errors='replace'))
                 data.extend(chunk); self.log.extend(chunk)
-                if b'KITOS> ' in data:
-                    return data.decode(errors='replace')
+                if b'[shell] /bin/sh ready' in data or b'\x1b]133;' in data:self.normal_shell=True
+                ready=b'\x1b]133;B\x07' in data
+                clean=re.sub(rb'\x1b\][^\x07]*(?:\x07)',b'',data)
+                clean=re.sub(rb'\x1b\[[0-9;?]*[A-Za-z]',b'',clean)
+                if ready or (not getattr(self,'normal_shell',False) and re.search(rb'root@ekitos:[^\r\n]*# ',clean)):
+                    return clean.decode(errors='replace')
         raise RuntimeError('QEMU timeout: ' + data.decode(errors='replace'))
-    def command(self, text, expect=None, allow_error=False):
+    def command(self, text, expect=None, allow_error=False, timeout=15):
         self.p.stdin.write(text.encode() + b'\r'); self.p.stdin.flush()
-        result = self.prompt()
+        result = self.prompt(timeout)
         if ('error' in result and not allow_error) or 'FAIL' in result or (expect and expect not in result):
             raise AssertionError(f'{text}: {result}')
         return result
@@ -76,7 +81,7 @@ def main():
             machine.command('append "/regress/Long Name.txt" " + VFS"')
             machine.command('cat "/regress/Long Name.txt"', 'hello SD + VFS')
             machine.command('truncate "/regress/Long Name.txt" 5')
-            machine.command('cat "/regress/Long Name.txt"', 'hello\r\n')
+            machine.command('cat "/regress/Long Name.txt"', 'hello')
             machine.command('mv "/regress/Long Name.txt" /PERSIST.TXT')
             machine.command('rmdir /regress')
             machine.command('ls /', 'PERSIST.TXT')
@@ -84,13 +89,14 @@ def main():
             machine.command('gpio 17 1')
             machine.command('gpio 17 in')
             machine.command('gpio 17 up')
-            machine.command('ps', 'monitor')
+            machine.command('ps', '/bin/sh')
         finally:
             machine.close(); transcript.extend(machine.log)
+            (directory / 'qemu-transcript.txt').write_bytes(transcript)
         machine = Machine(args.qemu, args.kernel, disk)
         try:
             assert 'FAT32 ready via VFS' in machine.prompt()
-            machine.command('cat /PERSIST.TXT', 'hello\r\n')
+            machine.command('cat /PERSIST.TXT', 'hello')
             machine.command('cat /USER.TXT', 'Newlib file IO 42')
             machine.command('selftest', 'preempt/sleep PASS')
             machine.command('usertest', 'EL0 syscall/fault-isolation/reclaim PASS')
@@ -104,7 +110,7 @@ def main():
         if fsck: subprocess.run([fsck, '-n', str(disk)], check=True)
     machine = Machine(args.qemu, args.kernel, None)
     try:
-        assert 'unavailable; monitor remains available' in machine.prompt()
+        assert 'unavailable; shell remains available' in machine.prompt()
         machine.command('selftest', 'preempt/sleep PASS')
         machine.command('memtest', 'MMU/page/VM/uaccess/reclaim PASS')
         machine.command('usertest', 'EL0 syscall/fault-isolation/reclaim PASS')

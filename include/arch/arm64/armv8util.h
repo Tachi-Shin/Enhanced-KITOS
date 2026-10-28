@@ -8,12 +8,12 @@
 
 #define WriteSysReg(sysreg, val) do {                    \
      uint64_t _r = val;                                    \
-     asm volatile("msr " TOSTRING(sysreg) ", %0" : : "r" (_r));       \
+     __asm__ volatile("msr " TOSTRING(sysreg) ", %0" : : "r" (_r));       \
      } while (0)
 
 #define ReadSysReg(sysreg) ({                          \
       uint64_t _r;                                        \
-      asm volatile("mrs  %0, " TOSTRING(sysreg) : "=r" (_r));         \
+      __asm__ volatile("mrs  %0, " TOSTRING(sysreg) : "=r" (_r));         \
      _r; })
 
 
